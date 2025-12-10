@@ -1,0 +1,27 @@
+# Rust build artifacts
+/target
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+
+# IDE / Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# RKLLM model files
+*.rkllm
+
+# Library file (should be added manually)
+src/lib/librkllmrt.so
+
+# Test outputs
+last_hidden_layer.bin
+
+sample/
