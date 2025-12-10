@@ -150,6 +150,29 @@ The model is initialized with the following default parameters (can be modified 
 - `repeat_penalty`: 1.2
 - `skip_special_token`: true
 
+## Works
+
+```shell
+❯ ./target/release/rkllm-cli chat --model /homeuser/Developer/LLMs/gemma-3-1b-it_w8a8_g128_rk3588.rkllm
+Loading model: /home/user/Developer/LLMs/gemma-3-1b-it_w8a8_g128_rk3588.rkllm
+Initializing RKLLM...
+I rkllm: rkllm-runtime version: 1.2.3, rknpu driver version: 0.9.8, platform: RK3588
+I rkllm: loading rkllm model from /home/user/Developer/LLMs/gemma-3-1b-it_w8a8_g128_rk3588.rkllm
+I rkllm: rkllm-toolkit version: 1.2.1, max_context_limit: 4096, npu_core_num: 3, target_platform: RK3588, model_dtype: W8A8_G128
+I rkllm: Enabled cpus: [4, 5, 6, 7]
+I rkllm: Enabled cpus num: 4
+Model loaded successfully!
+
+RKLLM Chat CLI
+Type your message and press Enter to chat.
+Type 'exit' or press Ctrl+C to quit.
+─────────────────────────────────────────
+
+> おはようございます
+
+Assistant: こんにちは！何かお手伝いできることはありますか？ 😊
+```
+
 ## Troubleshooting
 
 ### Library Not Found
