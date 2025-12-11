@@ -91,6 +91,27 @@ Type 'exit' or press Ctrl+C to quit.
 
 > おはようございます
 Assistant: こんにちは！何かお手伝いできることはありますか？ 😊
+
+> README.md を読んで日本語にしてください。
+
+[Detected files: README.md]
+[Successfully loaded 1 file(s)]
+
+Assistant: Okay, let's translate the README file into Japanese. Here’s a translation of the provided text, aiming for clarity and naturalness:
+
+**ファイル:** <files>
+**ファイルパス:** README.md
+# RKLLM CLI
+
+Rust実装による、Rockchip NPUハードウェア (rk3588, rk3576)上で大規模言語モデル (LLM) を利用するためのコマンドラインインターフェース。`librkllmrt.so`ライブラリを使用します。
+
+## プロジェクト概要
+
+このプロジェクトは、Rockchip NPUハードウェア (rk3588またはrk3576)で動作する大規模言語モデル (LLM) を、RUST関数を使ってネイティブの `librkllmrt.so` ライブラリと通信します。
+
+## 機能
+
+- **インタラクティブチャット**: ストリーミ...........
 ```
 
 ### Commands
