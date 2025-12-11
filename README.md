@@ -12,14 +12,17 @@ This project provides a command-line interface to interact with Large Language M
 - **Safe Rust Wrapper**: Type-safe Rust bindings for the C library
 - **UTF-8 Handling**: Proper handling of incomplete multi-byte UTF-8 sequences during streaming
 - **Error Handling**: Comprehensive error handling with `anyhow`
+- **Reading Files**: Read local files and hand over to LLM model
 
 ## Prerequisites
 
 ### Hardware
+
 - Rockchip board (rk3588 or rk3576) with NPU support
 - Example: Rock5B running Armbian (aarch64)
 
 ### Software
+
 - Rust toolchain (for aarch64-unknown-linux-gnu if cross-compiling)
 - `librkllmrt.so` library (provided by Rockchip)
 - RKLLM model file (`.rkllm` format)
@@ -60,6 +63,7 @@ cargo build --release --target aarch64-unknown-linux-gnu
 ```
 
 The binary will be located at:
+
 - Native: `target/release/rkllm-cli`
 - Cross-compiled: `target/aarch64-unknown-linux-gnu/release/rkllm-cli`
 
@@ -74,7 +78,7 @@ The binary will be located at:
 ### Example
 
 ```bash
-❯ ./target/release/rkllm-cli chat --model /hom/euser/Developer/LLMs/gemma-3-1b-it_w8a8_g128_rk3588.rkllm
+❯ ./target/release/rkllm-cli chat --model /hoe/user/Developer/LLMs/gemma-3-1b-it_w8a8_g128_rk3588.rkllm
 Loading model: /home/user/Developer/LLMs/gemma-3-1b-it_w8a8_g128_rk3588.rkllm
 Initializing RKLLM...
 I rkllm: rkllm-runtime version: 1.2.3, rknpu driver version: 0.9.8, platform: RK3588
