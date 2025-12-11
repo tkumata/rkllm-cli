@@ -9,8 +9,15 @@ clap = { version = "4.5", features = ["derive"] }
 rustyline = "14.0"
 anyhow = "1.0"
 thiserror = "1.0"
+regex = "1.10"
+shellexpand = "3.1"
+path-absolutize = "3.1"
+mime_guess = "2.0"
 
 [build-dependencies]
+
+[dev-dependencies]
+tempfile = "3.8"
 
 [[bin]]
 name = "rkllm-cli"
