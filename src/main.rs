@@ -1,6 +1,9 @@
 mod chat;
 mod ffi;
+mod file_detector;
+mod file_ops;
 mod llm;
+mod prompt_builder;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

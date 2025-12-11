@@ -1,4 +1,7 @@
+use crate::file_detector;
+use crate::file_ops;
 use crate::llm::{RKLLMConfig, RKLLM};
+use crate::prompt_builder;
 use anyhow::{Context, Result};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
@@ -46,10 +49,39 @@ impl ChatSession {
 
                     let _ = rl.add_history_entry(input);
 
+                    // ファイルパスを検出
+                    let file_paths = file_detector::detect_file_paths(input);
+
+                    // プロンプトを構築
+                    let prompt = if file_paths.is_empty() {
+                        // ファイルがない場合はシンプルなプロンプト
+                        prompt_builder::build_simple_prompt(input)
+                    } else {
+                        // ファイルを読み込む
+                        println!("\n[Detected files: {}]", file_paths.join(", "));
+                        let (files, errors) = file_ops::read_files(&file_paths);
+
+                        // 成功したファイルを表示
+                        if !files.is_empty() {
+                            println!(
+                                "[Successfully loaded {} file(s)]",
+                                files.len()
+                            );
+                        }
+
+                        // エラーを表示
+                        for (path, error) in &errors {
+                            eprintln!("[Error loading '{}': {}]", path, error);
+                        }
+
+                        // プロンプトを構築
+                        prompt_builder::build_prompt(input, &files, &errors)
+                    };
+
                     print!("\nAssistant: ");
                     io::stdout().flush().unwrap();
 
-                    match self.rkllm.run(input, |_text| {
+                    match self.rkllm.run(&prompt, |_text| {
                         // Text is already printed in the callback
                     }) {
                         Ok(_) => {
