@@ -25,3 +25,4 @@ src/lib/librkllmrt.so
 last_hidden_layer.bin
 
 sample/
+examples/
