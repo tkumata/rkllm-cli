@@ -12,7 +12,7 @@ This project provides a command-line interface to interact with Large Language M
 - **Safe Rust Wrapper**: Type-safe Rust bindings for the C library
 - **UTF-8 Handling**: Proper handling of incomplete multi-byte UTF-8 sequences during streaming
 - **Error Handling**: Comprehensive error handling with `anyhow`
-- **Reading Files**: Read local files and hand over to LLM model
+- **Reading Files**: ✨ Read local files and hand over to LLM model
 
 ## Prerequisites
 
@@ -77,46 +77,7 @@ The binary will be located at:
 
 ### Example
 
-```bash
-❯ ./target/release/rkllm-cli chat --model /hoe/user/Developer/LLMs/gemma-3-1b-it_w8a8_g128_rk3588.rkllm
-Loading model: /home/user/Developer/LLMs/gemma-3-1b-it_w8a8_g128_rk3588.rkllm
-Initializing RKLLM...
-I rkllm: rkllm-runtime version: 1.2.3, rknpu driver version: 0.9.8, platform: RK3588
-I rkllm: loading rkllm model from /home/user/Developer/LLMs/gemma-3-1b-it_w8a8_g128_rk3588.rkllm
-I rkllm: rkllm-toolkit version: 1.2.1, max_context_limit: 4096, npu_core_num: 3, target_platform: RK3588, model_dtype: W8A8_G128
-I rkllm: Enabled cpus: [4, 5, 6, 7]
-I rkllm: Enabled cpus num: 4
-Model loaded successfully!
-
-RKLLM Chat CLI
-Type your message and press Enter to chat.
-Type 'exit' or press Ctrl+C to quit.
-─────────────────────────────────────────
-
-> おはようございます
-Assistant: こんにちは！何かお手伝いできることはありますか？ 😊
-
-> README.md を読んで日本語にしてください。
-
-[Detected files: README.md]
-[Successfully loaded 1 file(s)]
-
-Assistant: Okay, let's translate the README file into Japanese. Here’s a translation of the provided text, aiming for clarity and naturalness:
-
-**ファイル:** <files>
-**ファイルパス:** README.md
-# RKLLM CLI
-
-Rust実装による、Rockchip NPUハードウェア (rk3588, rk3576)上で大規模言語モデル (LLM) を利用するためのコマンドラインインターフェース。`librkllmrt.so`ライブラリを使用します。
-
-## プロジェクト概要
-
-このプロジェクトは、Rockchip NPUハードウェア (rk3588またはrk3576)で動作する大規模言語モデル (LLM) を、RUST関数を使ってネイティブの `librkllmrt.so` ライブラリと通信します。
-
-## 機能
-
-- **インタラクティブチャット**: ストリーミ...........
-```
+![screenshot](./docs/screenshot.png)
 
 ### Commands
 
