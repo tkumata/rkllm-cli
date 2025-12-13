@@ -2,6 +2,7 @@ mod chat;
 mod ffi;
 mod file_detector;
 mod file_ops;
+mod file_output_parser;
 mod llm;
 mod prompt_builder;
 

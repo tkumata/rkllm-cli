@@ -1,5 +1,25 @@
 use crate::file_ops::FileContent;
 
+/// ファイル操作の指示（システムプロンプト）
+const FILE_OPERATION_INSTRUCTIONS: &str = r#"
+## File Operation Instructions
+
+When you need to create or modify files, use the following format:
+
+<file path="path/to/file.ext">
+file content here
+</file>
+
+Example:
+<file path="src/example.rs">
+fn main() {
+    println!("Hello");
+}
+</file>
+
+You can create multiple files in a single response.
+"#;
+
 /// ファイル内容を含むプロンプトを構築する
 ///
 /// # 引数
@@ -28,6 +48,10 @@ pub fn build_prompt(
     errors: &[(String, String)],
 ) -> String {
     let mut prompt = String::new();
+
+    // ファイル操作の指示を追加
+    prompt.push_str(FILE_OPERATION_INSTRUCTIONS);
+    prompt.push_str("\n");
 
     // ファイル内容を追加
     if !files.is_empty() || !errors.is_empty() {
@@ -64,9 +88,18 @@ pub fn build_prompt(
 /// * `user_input` - ユーザーの入力
 ///
 /// # 戻り値
-/// ユーザー入力のみのプロンプト
+/// ファイル操作指示とユーザー入力を含むプロンプト
 pub fn build_simple_prompt(user_input: &str) -> String {
-    user_input.to_string()
+    let mut prompt = String::new();
+
+    // ファイル操作の指示を追加
+    prompt.push_str(FILE_OPERATION_INSTRUCTIONS);
+    prompt.push_str("\n");
+
+    // ユーザー入力を追加
+    prompt.push_str(user_input);
+
+    prompt
 }
 
 #[cfg(test)]
@@ -118,11 +151,13 @@ mod tests {
         assert!(prompt.contains("<user_input>"));
         assert!(prompt.contains("日本の首都は？"));
         assert!(prompt.contains("</user_input>"));
+        assert!(prompt.contains("File Operation Instructions"));
     }
 
     #[test]
     fn test_build_simple_prompt() {
         let prompt = build_simple_prompt("こんにちは");
-        assert_eq!(prompt, "こんにちは");
+        assert!(prompt.contains("こんにちは"));
+        assert!(prompt.contains("File Operation Instructions"));
     }
 }

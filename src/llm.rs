@@ -33,7 +33,7 @@ impl Default for RKLLMConfig {
             top_k: 64,              // default 1
             top_p: 0.95,            // default 0.9
             temperature: 1.0,       // default 0.8
-            repeat_penalty: 1.1,
+            repeat_penalty: 1.0,    // default 1.1
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             mirostat: 0,
@@ -116,7 +116,7 @@ impl RKLLM {
         })
     }
 
-    pub fn run<F>(&self, prompt: &str, mut _callback: F) -> Result<()>
+    pub fn run<F>(&self, prompt: &str, mut _callback: F) -> Result<String>
     where
         F: FnMut(&str),
     {
@@ -181,7 +181,9 @@ impl RKLLM {
             return Err(anyhow!("Error occurred during inference"));
         }
 
-        Ok(())
+        // 収集した応答テキストを返す
+        let output = String::from_utf8_lossy(&ctx.output_buffer).to_string();
+        Ok(output)
     }
 }
 
