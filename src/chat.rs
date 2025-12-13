@@ -1,5 +1,6 @@
 use crate::file_detector;
 use crate::file_ops;
+use crate::file_output_parser;
 use crate::llm::{RKLLMConfig, RKLLM};
 use crate::prompt_builder;
 use anyhow::{Context, Result};
@@ -94,14 +95,19 @@ impl ChatSession {
                 prompt_builder::build_prompt(&trimmed, &files, &errors)
             };
 
-            print!("\n🪨 ");
+            print!("\n◆ ");
             io::stdout().flush().unwrap();
 
             match self.rkllm.run(&prompt, |_text| {
                 // Text is already printed in the callback
             }) {
-                Ok(_) => {
+                Ok(output) => {
                     println!(); // Add a newline after the response
+
+                    // ファイル操作を処理
+                    if let Err(e) = self.process_file_operations(&output) {
+                        eprintln!("\nError processing file operations: {}", e);
+                    }
                 }
                 Err(e) => {
                     eprintln!("\nError during inference: {}", e);
@@ -255,6 +261,74 @@ impl ChatSession {
         print!("{}", SetForegroundColor(Color::Rgb { r: 100, g: 149, b: 237 }));
         println!("{}", "─".repeat(width));
         print!("{}", ResetColor);
+    }
+
+    /// ファイル上書きの確認を求める
+    ///
+    /// # 引数
+    /// * `path` - ファイルパス
+    ///
+    /// # 戻り値
+    /// ユーザーが'y'を入力した場合はtrue、それ以外はfalse
+    fn confirm_overwrite(&self, path: &str) -> Result<bool> {
+        print!("\n[File '{}' already exists. Overwrite? (y/N): ", path);
+        io::stdout().flush()?;
+
+        // 一時的にraw modeを無効化
+        let was_raw_mode = terminal::is_raw_mode_enabled()?;
+        if was_raw_mode {
+            terminal::disable_raw_mode()?;
+        }
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+
+        // raw modeを元に戻す
+        if was_raw_mode {
+            terminal::enable_raw_mode()?;
+        }
+
+        Ok(input.trim().eq_ignore_ascii_case("y"))
+    }
+
+    /// LLMの応答からファイル操作を処理する
+    ///
+    /// # 引数
+    /// * `output` - LLMの出力テキスト
+    fn process_file_operations(&self, output: &str) -> Result<()> {
+        let operations = file_output_parser::parse_file_operations(output);
+
+        if operations.is_empty() {
+            return Ok(());
+        }
+
+        println!("\n[Detected {} file operation(s)]", operations.len());
+
+        for op in operations {
+            match op.operation_type {
+                file_output_parser::FileOperationType::Create => {
+                    // ファイルが既に存在する場合は確認
+                    if file_ops::file_exists(&op.path) {
+                        if !self.confirm_overwrite(&op.path)? {
+                            println!("[Skipped: {}]", op.path);
+                            continue;
+                        }
+                    }
+
+                    // ファイルを書き込む
+                    match file_ops::write_file(&op.path, &op.content, false) {
+                        Ok(_) => {
+                            println!("[Created/Updated: {}]", op.path);
+                        }
+                        Err(e) => {
+                            eprintln!("[Error writing '{}': {}]", op.path, e);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
 }

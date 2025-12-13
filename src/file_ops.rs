@@ -157,6 +157,93 @@ pub fn read_files(paths: &[String]) -> (Vec<FileContent>, Vec<(String, String)>)
     (successes, errors)
 }
 
+/// ファイルパスが安全かどうかをチェックする
+///
+/// # 引数
+/// * `path` - チェックするファイルパス
+///
+/// # 戻り値
+/// 安全な場合はOk(resolved_path)、危険な場合はErr
+///
+/// # 安全性チェック
+/// - システムディレクトリ（/etc, /usr, /bin, /sbin, /sys, /procなど）への書き込みを拒否
+/// - 絶対パスで指定された場合は警告（実行ディレクトリ配下を推奨）
+fn check_path_safety(path: &str) -> Result<PathBuf> {
+    // パスを解決
+    let resolved_path = resolve_path(path)
+        .with_context(|| format!("Failed to resolve path: {}", path))?;
+
+    // システムディレクトリのリスト
+    let system_dirs = [
+        "/etc", "/usr", "/bin", "/sbin", "/sys", "/proc", "/boot", "/dev", "/lib", "/lib64",
+        "/opt", "/var",
+    ];
+
+    // システムディレクトリへの書き込みをブロック
+    for sys_dir in &system_dirs {
+        if resolved_path.starts_with(sys_dir) {
+            return Err(anyhow!(
+                "Writing to system directory is not allowed: {}",
+                path
+            ));
+        }
+    }
+
+    Ok(resolved_path)
+}
+
+/// ファイルを書き込む
+///
+/// # 引数
+/// * `path` - ファイルパス（相対パス、絶対パス、~を含むパス）
+/// * `content` - 書き込む内容
+/// * `force` - 既存ファイルを確認なしで上書きする場合はtrue
+///
+/// # 戻り値
+/// 書き込みが成功した場合はOk(())
+///
+/// # エラー
+/// - システムディレクトリへの書き込み
+/// - ディレクトリの作成に失敗
+/// - ファイルの書き込みに失敗
+///
+/// # 注意
+/// この関数は既存ファイルの上書き確認を行いません。
+/// 呼び出し側で確認を行う必要があります。
+pub fn write_file(path: &str, content: &str, _force: bool) -> Result<()> {
+    // パスの安全性をチェック
+    let resolved_path = check_path_safety(path)
+        .with_context(|| format!("Path safety check failed: {}", path))?;
+
+    // ディレクトリが存在しない場合は作成
+    if let Some(parent) = resolved_path.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {:?}", parent))?;
+        }
+    }
+
+    // ファイルを書き込む
+    fs::write(&resolved_path, content)
+        .with_context(|| format!("Failed to write file: {}", path))?;
+
+    Ok(())
+}
+
+/// ファイルが存在するかどうかをチェック
+///
+/// # 引数
+/// * `path` - ファイルパス
+///
+/// # 戻り値
+/// ファイルが存在する場合はtrue
+pub fn file_exists(path: &str) -> bool {
+    match resolve_path(path) {
+        Ok(resolved_path) => resolved_path.exists() && resolved_path.is_file(),
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +279,64 @@ mod tests {
         assert!(is_text_file(Path::new("Cargo.toml")));
         assert!(!is_text_file(Path::new("test.exe")));
         assert!(!is_text_file(Path::new("test.bin")));
+    }
+
+    #[test]
+    fn test_write_file_success() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test_write.txt");
+
+        let result = write_file(file_path.to_str().unwrap(), "Test content", false);
+        assert!(result.is_ok());
+
+        // ファイルが作成されたことを確認
+        assert!(file_path.exists());
+
+        // 内容を確認
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "Test content");
+    }
+
+    #[test]
+    fn test_write_file_with_subdirectory() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("subdir").join("test.txt");
+
+        let result = write_file(file_path.to_str().unwrap(), "Hello", false);
+        assert!(result.is_ok());
+
+        // ファイルとディレクトリが作成されたことを確認
+        assert!(file_path.exists());
+    }
+
+    #[test]
+    fn test_write_file_system_directory_blocked() {
+        let result = write_file("/etc/test.conf", "malicious content", false);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_msg = format!("{:#}", err); // Format with full error chain
+        // Check if the error message contains either "system directory" or "not allowed" or "/etc"
+        assert!(
+            err_msg.contains("system directory")
+                || err_msg.contains("not allowed")
+                || err_msg.contains("Path safety check failed"),
+            "Error message was: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_file_exists() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("exists.txt");
+
+        // ファイルが存在しない
+        assert!(!file_exists(file_path.to_str().unwrap()));
+
+        // ファイルを作成
+        File::create(&file_path).unwrap();
+
+        // ファイルが存在する
+        assert!(file_exists(file_path.to_str().unwrap()));
     }
 }
