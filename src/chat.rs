@@ -113,7 +113,7 @@ impl ChatSession {
                     println!(); // Add a newline after the response
 
                     // ファイル操作を処理
-                    if let Err(e) = self.process_file_operations(&response.output) {
+                    if let Err(e) = self.process_file_operations(&response) {
                         eprintln!("\nError processing file operations: {}", e);
                     }
                 }

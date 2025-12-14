@@ -20,7 +20,6 @@ Rockchip が提供する C ライブラリ `librkllmrt.so` (aarch64) を Rust �
 
 ### 第二弾: Claude CLI 風のファイル操作機能
 
-- ファイルをアップロードして内容を参照しながらチャット
 - コンテキストにファイルを含める
 
 ### 第三弾: MCP クライアント機能
@@ -191,13 +190,13 @@ except UnicodeDecodeError as e:
 ### 初期化時のパラメータ例
 
 ```python
-max_context_len = 2048
+max_context_len = 4096
 max_new_tokens = -1          # -1 で無制限
 skip_special_token = True
-top_k = 1
+top_k = 20
 top_p = 0.9
-temperature = 0.5
-repeat_penalty = 1.2
+temperature = 0.7
+repeat_penalty = 1.0
 frequency_penalty = 0.0
 presence_penalty = 0.0
 mirostat = 0
@@ -343,7 +342,6 @@ fn main() {
 第一弾が完成したら、以下の機能を追加予定:
 
 - **第二弾**: Claude CLI 風のファイル操作機能
-  - ファイルアップロード
   - コンテキストにファイル内容を含める
   - マルチターン会話でのファイル参照
 
