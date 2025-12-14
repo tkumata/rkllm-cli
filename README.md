@@ -6,6 +6,8 @@ Rust implementation of a CLI tool for chatting with LLM models on Rockchip NPU u
 
 This project provides a command-line interface to interact with Large Language Models (LLMs) running on Rockchip NPU hardware (rk3588, rk3576). It uses Rust FFI bindings to communicate with the native `librkllmrt.so` library.
 
+I couldn't understand why Rockchip's samples use the adb command. That's why I created this program. I want to use the NPU on rock5B.
+
 ## Features
 
 - **Interactive Chat**: Command-line chat interface with streaming output

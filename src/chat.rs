@@ -131,7 +131,6 @@ impl ChatSession {
 
     fn read_multiline_input(&self, stdout: &mut std::io::Stdout) -> Result<Option<String>> {
         let mut buffer = String::new();
-        let mut current_line = 0; // Track which line we're currently on (0-indexed)
 
         loop {
             if event::poll(std::time::Duration::from_millis(100))? {
@@ -155,8 +154,9 @@ impl ChatSession {
 
                             // First Ctrl+C or timeout - show message and update time
                             *last_time = Some(now);
+                            let num_newlines = buffer.chars().filter(|&c| c == '\n').count();
                             execute!(stdout, Print("\r\n[Press Ctrl+C again to exit]\r\n❯ "))?;
-                            self.redraw_buffer(stdout, &buffer, current_line)?;
+                            self.redraw_buffer(stdout, &buffer, num_newlines)?;
                         }
 
                         // Ctrl+D to exit
@@ -176,7 +176,6 @@ impl ChatSession {
                         } => {
                             buffer.push('\n');
                             execute!(stdout, Print("\r\n  "))?;
-                            current_line += 1;
                         }
 
                         // Enter to submit
@@ -194,10 +193,12 @@ impl ChatSession {
                             ..
                         } => {
                             if buffer.pop().is_some() {
-                                // Use current_line (before deletion) to go back to start
-                                self.redraw_buffer(stdout, &buffer, current_line)?;
-                                // Update current_line based on new buffer
-                                current_line = buffer.chars().filter(|&c| c == '\n').count();
+                                // Simply move cursor back and clear from cursor to end
+                                execute!(
+                                    stdout,
+                                    cursor::MoveLeft(1),
+                                    terminal::Clear(terminal::ClearType::FromCursorDown)
+                                )?;
                             }
                         }
 
