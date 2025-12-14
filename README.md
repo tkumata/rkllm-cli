@@ -129,12 +129,12 @@ rkllm-cli/
 
 The model is initialized with the following default parameters (can be modified in `llm.rs`):
 
-- `max_context_len`: 2048
+- `max_context_len`: 4096
 - `max_new_tokens`: -1 (unlimited)
-- `top_k`: 1
-- `top_p`: 0.9
-- `temperature`: 0.5
-- `repeat_penalty`: 1.2
+- `top_k`: 20
+- `top_p`: 0.8
+- `temperature`: 0.7
+- `repeat_penalty`: 1.0
 - `skip_special_token`: true
 
 ## Troubleshooting
