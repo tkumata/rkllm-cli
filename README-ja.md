@@ -1,46 +1,46 @@
 
 # RKLLM CLI
 
-(これは Gemma3:4B IT をモデルで利用し、本プログラムで「README.mdを読み込んで、翻訳結果をREADME-ja.mdに書いて」で出力されてものです。
+(このファイルは、Qwen3 1B を用いて、本プログラムで「英語のREADME.mdを読み込んで、日本語に翻訳し結果をREADME-ja.mdに保存してください。」と指示した結果です。)
 
-Rust実装による、Rockchip NPU上でLLMモデルとチャットするためのCLIツール。 `librkllmrt.so`ライブラリを使用。
+Rust実装のCLIツールで、Rockchip NPU上で動作するLarge Language Models (LLMs) と通信するためのツールです。`librkllmrt.so`ライブラリを使用して、ローカルファイルを読み込むことも可能で、Rust FFIバインディングを使用してCライブラリとのインターフェースを提供しています。
 
 ## プロジェクト概要
 
-このプロジェクトは、大規模言語モデル (LLM) をRockchip NPUハードウェア (rk3588, rk3576) で実行するためのコマンドラインインターフェースを提供します。Rust FFIバインディングを使用して、ネイティブの `librkllmrt.so` ライブラリと通信します。
+このプロジェクトは、Rockchip NPU (rk3588, rk3576) に搭載されたLLMモデルと通信するためのコマンドラインインターフェースを提供します。`librkllmrt.so`ライブラリを使用して、ローカルファイルを読み込むことも可能です。
 
-## 機能
+## フェアリティ
 
-- **インタラクティブチャット**: ストリーミング出力を含むコマンドラインチャットインターフェース
-- **安全なRustラッパー**: Cライブラリ向けの型安全なRustバインディング
-- **UTF-8処理**: ストリーミング中に不完全なマルチバイトUTF-8シーケンスの適切な処理
-- **エラー処理**: `anyhow`を使用した包括的なエラー処理
-- **ファイル読み込み**: ローカルファイルを読み込み、LLMモデルに渡す
+- **インタラクティブなチャット**: ターミナルでメッセージを送信し、ストリーミング出力を受け付けるインターフェース
+- **セーフなRustラッパー**: Cライブラリとの型安全なインターフェース
+- **UTF-8処理**: ストリーミング中に不完全なマルチバイトUTF-8セキュリティを処理
+- **エラー処理**: `anyhow`を使用したフルエラーハンドリング
+- **ファイル読み込み**: ローカルファイルを読み込む機能
 
 ## 前提条件
 
 ### ハードウェア
 
-- Rockchipボード (rk3588またはrk3576) とNPUサポート
-- 例：Rock5B での Armbian (aarch64)
+- Rockchipボード (rk3588またはrk3576) にNPUサポートが含まれる
+- 例: Rock5BでArmbian (aarch64) を稼働中
 
 ### ソフトウェア
 
-- Rustツールチェーン (aarch64-unknown-linux-gnu などのクロスコンパイルの場合)
-- `librkllmrt.so` ライブラリ (Rockchipから提供)
-- RKLLMモデルファイル (`.rkllm`形式)
+- Rustツールチェーン (aarch64-unknown-linux-gnuのためのクロスコンパイル)
+- `librkllmrt.so`ライブラリ (Rockchip提供)
+- RKLLMモデルファイル (`.rkllm`フォーマット)
 
-## セットアップ
+## システムセット
 
-### 1. 共有ライブラリの配置
+### 1. ライブラリの配置
 
-`librkllmrt.so` を `src/lib` ディレクトリにコピーします。
+ローカルディレクトリにコピー:
 
 ```bash
 cp /path/to/librkllmrt.so src/lib/
 ```
 
-または、ターゲットデバイスのシステムライブラリパスに配置します。
+または、ターゲットデバイスに配置:
 
 ```bash
 sudo cp librkllmrt.so /usr/local/lib/
@@ -49,25 +49,25 @@ sudo ldconfig
 
 ### 2. プロジェクトのビルド
 
-ネイティブビルドの場合:
+ターゲットデバイス上でビルド:
 
 ```bash
 cargo build --release
 ```
 
-クロスコンパイルの場合:
+クロスコンパイル (MacまたはLinuxから):
 
 ```bash
-# クロスコンパイルツールチェーンをインストール
+# Rustupのインストール
 rustup target add aarch64-unknown-linux-gnu
 
 # ビルド
 cargo build --release --target aarch64-unknown-linux-gnu
 ```
 
-実行可能ファイルは次の場所にあります。
+ビルド後のバイナリが以下にあります:
 
-- ネイティブ: `target/release/rkllm-cli`
+- ナイティブ: `target/release/rkllm-cli`
 - クロスコンパイル: `target/aarch64-unknown-linux-gnu/release/rkllm-cli`
 
 ## 使用方法
@@ -78,98 +78,84 @@ cargo build --release --target aarch64-unknown-linux-gnu
 ./target/release/rkllm-cli chat --model /path/to/your/model.rkllm
 ```
 
-### 例
+### サンプル
 
 ![screenshot](./docs/screenshot.png)
 
 ### コマンド
 
-- メッセージを入力してEnterキーを押して送信
-- セッションを終了するには`exit`または`quit`を入力
-- セッションを中断して終了するには`Ctrl+C`を入力
+- メッセージを入力してEnterを押すと送信
+- `exit`または`quit`でセッションを終了
+- `Ctrl+C`で中断して終了
 
 ## プロジェクト構造
 
 ```
 rkllm-cli/
-├── Cargo.toml           # Rust パッケージ構成
-├── build.rs             # librkllmrt.so のリンキング用ビルドスクリプト
+├── Cargo.toml           # Rustパッケージ構成
+├── build.rs             # ビルドスクリプト
 ├── src/
-│   ├── main.rs          # CLI エントリポイント
-│   ├── ffi.rs           # librkllmrt.so の FFI バインディング
-│   ├── llm.rs           # RKLLM の安全な Rust ラッパー
+│   ├── main.rs          # CLIエントリポイント
+│   ├── ffi.rs           # FFIバインディング
+│   ├── llm.rs           # セーフなRustラッパー
 │   ├── chat.rs          # チャットセッションロジック
 │   └── lib/
-│       └── librkllmrt.so  # Rockchip RKLLM ランタイムライブラリ (ここに配置)
+│       └── librkllmrt.so  # Rockchip RKLLMランタイムライブラリ (場所に置いてください)
 ├── sample/
-│   └── gradio_server.py   # Python 参照実装
+│   └── gradio_server.py   # Python参照実装
 └── docs/
-    └── RKLLM_RUST_CLI_REQUIREMENTS.md  # 実装要件
+    └── RKLLM_RUST_CLI_REQUIREMENTS.md  # インターフェース要件
 ```
 
-## 実装の詳細
+## メッセージの構造
 
-### FFI バインディング (ffi.rs)
+- `#[repr(C)]`を使用してCコンパクトな構造体を定義
+- 実装の詳細は`ffi.rs`および`llm.rs`で確認
 
-- `#[repr(C)]` を使用して C-互換構造を定義
-- 全ての RKLLM API 関数とデータ型を定義
-- ストリーミング中に不完全なマルチバイト UTF-8 シーケンスの適切な処理
+## チャットロジック
 
-### RKLLM ラッパー (llm.rs)
-
-- RKLLM ライブラリの安全な Rust ラッパー
-- コールバックの登録と UTF-8 デコードの管理
-- 不完全なマルチバイトシーケンスの自動リソースクリーンアップ (`Drop` トレイトを使用)
-
-### チャットロジック (chat.rs)
-
-- `rustyline` を使用したインタラクティブ readline インターフェース
-- ストリーミング出力のサポート
+- ライナルベースのリーディングインターフェースを使用
+- ストリーミング出力サポート
 - コマンド履歴
 
-## 設定
+## 配置情報
 
-モデルは、デフォルトのパラメータで初期化されます ( `llm.rs` で変更可能):
+モデルは以下のデフォルトパラメータで初期化されます (`llm.rs`で変更可能です):
 
-- `max_context_len`: 2048
+- `max_context_len`: 4096
 - `max_new_tokens`: -1 (無制限)
-- `top_k`: 1
-- `top_p`: 0.9
-- `temperature`: 0.5
-- `repeat_penalty`: 1.2
+- `top_k`: 20
+- `top_p`: 0.8
+- `temperature`: 0.7
+- `repeat_penalty`: 1.0
 - `skip_special_token`: true
 
-## トラブルシューティング
+## ツールチケット
 
-### ライブラリが見つからない
+- ライブラリが見つからない場合:
+  1. ライブラリが`src/lib/`に配置されているか確認
+  2. `LD_LIBRARY_PATH`に設定:
+     ```bash
+     export LD_LIBRARY_PATH=/path/to/lib:$LD_LIBRARY_PATH
+     ./rkllm-cli chat --model model.rkllm
+     ```
 
-`librkllmrt.so` が見つからないエラーが発生した場合:
+## モデルロードエラー
 
-1. ライブラリが `src/lib/` ディレクトリに存在することを確認
-2. または、`LD_LIBRARY_PATH` を設定:
+- モデルファイルのパスが正しくないか確認
+- モデルが`.rkllm`フォーマットであるか確認
+- 足りないメモリがあるか確認
 
-   ```bash
-   export LD_LIBRARY_PATH=/path/to/lib:$LD_LIBRARY_PATH
-   ./rkllm-cli chat --model model.rkllm
-   ```
+## 今後のアップデート
 
-### モデルのロード失敗
-
-- モデルファイルのパスが正しいことを確認
-- モデルが RKLLM 形式 (`.rkllm`) であることを確認
-- ターゲットデバイスのメモリが十分であることを確認
-
-## 今後の改善点
-
-- **フェーズ 2**: ファイルアップロードとコンテキスト管理 (Claude CLI スタイルの)
-- **フェーズ 3**: MCP (Model Context Protocol) クライアントサポート
+- **Phase 2**: ファイルアップロードとコンテキスト管理 (Claude CLIスタイル)
+- **Phase 3**: MCP (Model Context Protocol) クライアントサポート
 
 ## ライセンス
 
-このプロジェクトは、Rockchip NPU ハードウェアで使用することを目的として提供されています。
+このプロジェクトは、Rockchip NPUハードウェアで提供されているものです。
 
-## 参照
+## 参考
 
-- Python 実装: `sample/gradio_server.py`
+- Python実装: `sample/gradio_server.py`
 - 要件ドキュメント: `docs/RKLLM_RUST_CLI_REQUIREMENTS.md`
-</file_error>
