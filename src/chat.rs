@@ -12,9 +12,12 @@ use crossterm::{
     terminal::{self},
 };
 use std::io::{self, stdout, Write};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 pub struct ChatSession {
     rkllm: RKLLM,
+    last_ctrl_c: Arc<Mutex<Option<Instant>>>,
 }
 
 impl ChatSession {
@@ -26,10 +29,14 @@ impl ChatSession {
 
         let rkllm = RKLLM::new(config).context("Failed to initialize RKLLM")?;
 
-        Ok(Self { rkllm })
+        Ok(Self {
+            rkllm,
+            last_ctrl_c: Arc::new(Mutex::new(None)),
+        })
     }
 
     pub fn start(&self) -> Result<()> {
+        self.print_separator(Color::Rgb { r: 100, g: 149, b: 237 });
         self.print_banner();
 
         terminal::enable_raw_mode().context("Failed to enable raw mode")?;
@@ -46,8 +53,8 @@ impl ChatSession {
     fn run_chat_loop(&self, stdout: &mut std::io::Stdout) -> Result<()> {
         loop {
             // Display prompt
-            self.print_separator();
-            execute!(stdout, Print("> "))?;
+            self.print_separator(Color::Rgb { r: 100, g: 149, b: 237 });
+            execute!(stdout, Print("❯ "))?;
 
             // Read multiline input
             let input = match self.read_multiline_input(stdout)? {
@@ -62,7 +69,7 @@ impl ChatSession {
             }
 
             if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit") {
-                execute!(stdout, Print("\r\nGoodbye!\r\n"))?;
+                execute!(stdout, Print("\r\nSee you!\r\n"))?;
                 break;
             }
 
@@ -95,17 +102,18 @@ impl ChatSession {
                 prompt_builder::build_prompt(&trimmed, &files, &errors)
             };
 
-            print!("\n◆ ");
+            self.print_separator(Color::Rgb { r: 100, g: 100, b: 100 });
+            print!("\n🔹 ");
             io::stdout().flush().unwrap();
 
             match self.rkllm.run(&prompt, |_text| {
                 // Text is already printed in the callback
             }) {
-                Ok(output) => {
+                Ok(response) => {
                     println!(); // Add a newline after the response
 
                     // ファイル操作を処理
-                    if let Err(e) = self.process_file_operations(&output) {
+                    if let Err(e) = self.process_file_operations(&response.output) {
                         eprintln!("\nError processing file operations: {}", e);
                     }
                 }
@@ -129,13 +137,30 @@ impl ChatSession {
             if event::poll(std::time::Duration::from_millis(100))? {
                 if let Event::Key(key_event) = event::read()? {
                     match key_event {
-                        // Ctrl+C or Ctrl+D to exit
+                        // Ctrl+C - need to press twice within 2 seconds to exit
                         KeyEvent {
                             code: KeyCode::Char('c'),
                             modifiers: KeyModifiers::CONTROL,
                             ..
+                        } => {
+                            let now = Instant::now();
+                            let mut last_time = self.last_ctrl_c.lock().unwrap();
+
+                            if let Some(last) = *last_time {
+                                // Check if within 2 seconds
+                                if now.duration_since(last).as_secs() < 2 {
+                                    return Ok(None);
+                                }
+                            }
+
+                            // First Ctrl+C or timeout - show message and update time
+                            *last_time = Some(now);
+                            execute!(stdout, Print("\r\n[Press Ctrl+C again to exit]\r\n❯ "))?;
+                            self.redraw_buffer(stdout, &buffer, current_line)?;
                         }
-                        | KeyEvent {
+
+                        // Ctrl+D to exit
+                        KeyEvent {
                             code: KeyCode::Char('d'),
                             modifiers: KeyModifiers::CONTROL,
                             ..
@@ -207,7 +232,7 @@ impl ChatSession {
             stdout,
             Print("\r"),
             terminal::Clear(terminal::ClearType::FromCursorDown),
-            Print("> ")
+            Print("❯ ")
         )?;
 
         // Print buffer, converting newlines to actual line breaks with indent
@@ -246,10 +271,10 @@ impl ChatSession {
         print!("{}", SetForegroundColor(cyan));
         print!("▜      ▛");
         print!("{}", ResetColor);
-        println!("   Type 'exit' or press Ctrl+C to quit.\n");
+        println!("   Type 'exit' or press Ctrl+C twice to quit.\n");
     }
 
-    fn print_separator(&self) {
+    fn print_separator(&self, color: Color) {
         // Get terminal width, fallback to 80 if unable to detect
         let width = if let Ok((cols, _)) = terminal::size() {
             cols as usize
@@ -257,9 +282,8 @@ impl ChatSession {
             80
         };
 
-        // Use light blue color (cyan)
-        print!("{}", SetForegroundColor(Color::Rgb { r: 100, g: 149, b: 237 }));
-        println!("{}", "─".repeat(width));
+        print!("{}", SetForegroundColor(color));
+        print!("{}", "─".repeat(width));
         print!("{}", ResetColor);
     }
 

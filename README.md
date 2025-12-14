@@ -13,6 +13,7 @@ This project provides a command-line interface to interact with Large Language M
 - **UTF-8 Handling**: Proper handling of incomplete multi-byte UTF-8 sequences during streaming
 - **Error Handling**: Comprehensive error handling with `anyhow`
 - **Reading Files**: ✨ Read local files and hand over to LLM model
+- **Writing files**: ✨ Write local file via LLM model
 
 ## Prerequisites
 
@@ -83,7 +84,7 @@ The binary will be located at:
 
 - Type your message and press Enter to send
 - Type `exit` or `quit` to end the session
-- Press `Ctrl+C` to interrupt and exit
+- Press `Ctrl+C and Ctrl+C` to interrupt and exit
 
 ## Project Structure
 
