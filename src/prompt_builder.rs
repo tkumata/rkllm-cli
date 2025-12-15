@@ -147,7 +147,6 @@ pub fn build_simple_prompt(user_input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_has_file_operation_intent_japanese() {
@@ -186,7 +185,6 @@ mod tests {
     #[test]
     fn test_build_prompt_with_files() {
         let files = vec![FileContent {
-            path: PathBuf::from("/home/user/test.txt"),
             content: "Hello, World!".to_string(),
             original_path: "test.txt".to_string(),
         }];

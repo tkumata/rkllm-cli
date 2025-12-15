@@ -7,6 +7,5 @@ pub mod types;
 pub mod transport;
 pub mod client;
 
-pub use config::{McpConfig, ServerConfig, Transport};
+pub use config::McpConfig;
 pub use client::McpClient;
-pub use types::{Tool, ToolCall, ToolResult};

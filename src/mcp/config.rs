@@ -30,8 +30,6 @@ pub enum Transport {
     Stdio,
     #[allow(dead_code)]
     Sse,
-    #[allow(dead_code)]
-    WebSocket,
 }
 
 fn default_transport() -> Transport {
@@ -47,6 +45,7 @@ impl McpConfig {
     }
 
     /// Create a default configuration
+    #[allow(dead_code)]
     pub fn default() -> Self {
         Self {
             servers: Vec::new(),

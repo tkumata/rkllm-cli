@@ -113,30 +113,6 @@ impl ChatSession {
                 break;
             }
 
-            // MCPツールのテストコマンド
-            if trimmed.starts_with("/test-mcp") {
-                terminal::disable_raw_mode().context("Failed to disable raw mode")?;
-
-                if let Some(mcp_client) = &self.mcp_client {
-                    println!("\n[Testing MCP tool call...]");
-
-                    // テスト用のツール呼び出し
-                    let test_call = "[TOOL_CALL]\n{\n  \"name\": \"list_directory\",\n  \"arguments\": {\n    \"path\": \"/home/kumata/Documents\"\n  }\n}\n[END_TOOL_CALL]";
-
-                    println!("Simulating tool call:\n{}", test_call);
-
-                    match self.process_tool_calls(test_call).await {
-                        Ok(_) => println!("\n[Test completed successfully]"),
-                        Err(e) => eprintln!("\n[Test failed: {}]", e),
-                    }
-                } else {
-                    println!("\n[MCP is not enabled. Use --mcp-config to enable it.]");
-                }
-
-                terminal::enable_raw_mode().context("Failed to enable raw mode")?;
-                continue;
-            }
-
             // Disable raw mode temporarily for LLM output
             terminal::disable_raw_mode().context("Failed to disable raw mode")?;
 
@@ -174,20 +150,45 @@ impl ChatSession {
                     tool_info.push_str("You have access to the following tools. Use them when appropriate:\n\n");
 
                     for (_server_name, tool) in &tools {
-                        tool_info.push_str(&format!(
-                            "- **{}**: {}\n",
-                            tool.name,
-                            tool.description.as_deref().unwrap_or("(no description)")
-                        ));
+                        tool_info.push_str(&format!("### {}\n", tool.name));
+                        if let Some(desc) = &tool.description {
+                            tool_info.push_str(&format!("{}\n\n", desc));
+                        }
+
+                        // スキーマから引数情報を取得
+                        tool_info.push_str("Arguments:\n");
+                        if let Some(properties) = &tool.input_schema.properties {
+                            for (arg_name, arg_schema) in properties {
+                                let arg_type = arg_schema.get("type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("string");
+                                let arg_desc = arg_schema.get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+
+                                let required_mark = if tool.input_schema.required.as_ref()
+                                    .map(|r| r.contains(arg_name))
+                                    .unwrap_or(false) {
+                                    " (required)"
+                                } else {
+                                    ""
+                                };
+
+                                tool_info.push_str(&format!(
+                                    "- `{}` ({}){}: {}\n",
+                                    arg_name, arg_type, required_mark, arg_desc
+                                ));
+                            }
+                        }
+                        tool_info.push_str("\n");
                     }
 
-                    tool_info.push_str("\nTo use a tool, output the following format:\n\n");
+                    tool_info.push_str("To use a tool, output:\n\n");
                     tool_info.push_str("[TOOL_CALL]\n");
                     tool_info.push_str("{\n");
                     tool_info.push_str("  \"name\": \"tool_name\",\n");
                     tool_info.push_str("  \"arguments\": {\n");
-                    tool_info.push_str("    \"arg1\": \"value1\",\n");
-                    tool_info.push_str("    \"arg2\": \"value2\"\n");
+                    tool_info.push_str("    \"argument_name\": \"value\"\n");
                     tool_info.push_str("  }\n");
                     tool_info.push_str("}\n");
                     tool_info.push_str("[END_TOOL_CALL]\n\n");

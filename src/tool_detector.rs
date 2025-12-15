@@ -96,11 +96,6 @@ impl ToolCallDetector {
 
         calls
     }
-
-    /// Check if text contains any tool calls
-    pub fn has_tool_calls(&self, text: &str) -> bool {
-        self.json_pattern.is_match(text) || self.xml_pattern.is_match(text)
-    }
 }
 
 impl Default for ToolCallDetector {
@@ -201,15 +196,5 @@ Then I'll save it to a file:
 
         let calls = detector.detect(text);
         assert_eq!(calls.len(), 0);
-        assert!(!detector.has_tool_calls(text));
-    }
-
-    #[test]
-    fn test_has_tool_calls() {
-        let detector = ToolCallDetector::new();
-
-        let text = "[TOOL_CALL]\n{\"name\": \"test\", \"arguments\": {}}\n[END_TOOL_CALL]";
-
-        assert!(detector.has_tool_calls(text));
     }
 }

@@ -6,9 +6,9 @@ use std::ptr;
 use std::sync::{Arc, Mutex};
 
 // Gemma chat template
-// const GEMMA_TEMPLATE: &str = "<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n";
+const GEMMA_TEMPLATE: &str = "<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n";
 // Qwen chat template
-const GEMMA_TEMPLATE: &str = "<|im_start|>system\nあなたは真面目だけど少しお茶目で優秀なAIです。正確な情報を提供します。必ず日本語で答えてください。<|im_end|><|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n";
+// const GEMMA_TEMPLATE: &str = "<|im_start|>system\nあなたは真面目だけど少しお茶目で優秀なAIです。正確な情報を提供します。必ず日本語で答えてください。<|im_end|><|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n";
 
 pub struct RKLLMConfig {
     pub model_path: String,
