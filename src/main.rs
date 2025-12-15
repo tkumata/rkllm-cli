@@ -4,7 +4,9 @@ mod file_detector;
 mod file_ops;
 mod file_output_parser;
 mod llm;
+mod mcp;
 mod prompt_builder;
+mod tool_detector;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -25,14 +27,19 @@ enum Commands {
         /// Path to the RKLLM model file
         #[arg(short, long)]
         model: PathBuf,
+
+        /// Path to MCP configuration file (optional)
+        #[arg(long)]
+        mcp_config: Option<PathBuf>,
     },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Chat { model } => {
+        Commands::Chat { model, mcp_config } => {
             if !model.exists() {
                 eprintln!("Error: Model file not found: {}", model.display());
                 std::process::exit(1);
@@ -46,12 +53,12 @@ fn main() -> Result<()> {
             println!("Loading model: {}", model_path);
             println!("Initializing RKLLM...");
 
-            let session = chat::ChatSession::new(model_path)?;
+            let session = chat::ChatSession::new(model_path, mcp_config).await?;
 
             println!("Model loaded successfully!");
             println!();
 
-            session.start()?;
+            session.start().await?;
         }
     }
 

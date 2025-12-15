@@ -2,7 +2,9 @@ use crate::file_detector;
 use crate::file_ops;
 use crate::file_output_parser;
 use crate::llm::{RKLLMConfig, RKLLM};
+use crate::mcp::{McpClient, McpConfig};
 use crate::prompt_builder;
+use crate::tool_detector::ToolCallDetector;
 use anyhow::{Context, Result};
 use crossterm::{
     cursor,
@@ -12,16 +14,19 @@ use crossterm::{
     terminal::{self},
 };
 use std::io::{self, stdout, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 pub struct ChatSession {
     rkllm: RKLLM,
+    mcp_client: Option<McpClient>,
+    tool_detector: ToolCallDetector,
     last_ctrl_c: Arc<Mutex<Option<Instant>>>,
 }
 
 impl ChatSession {
-    pub fn new(model_path: String) -> Result<Self> {
+    pub async fn new(model_path: String, mcp_config_path: Option<PathBuf>) -> Result<Self> {
         let config = RKLLMConfig {
             model_path,
             ..Default::default()
@@ -29,20 +34,55 @@ impl ChatSession {
 
         let rkllm = RKLLM::new(config).context("Failed to initialize RKLLM")?;
 
+        // Initialize MCP client if config file is provided
+        let mcp_client = if let Some(config_path) = mcp_config_path {
+            if config_path.exists() {
+                println!("Loading MCP configuration from: {}", config_path.display());
+                match McpConfig::load(&config_path) {
+                    Ok(mcp_config) => {
+                        if !mcp_config.is_empty() {
+                            match McpClient::new(mcp_config).await {
+                                Ok(client) => Some(client),
+                                Err(e) => {
+                                    eprintln!("Failed to initialize MCP client: {}", e);
+                                    None
+                                }
+                            }
+                        } else {
+                            println!("[MCP: Configuration file is empty]");
+                            None
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to load MCP configuration: {}", e);
+                        None
+                    }
+                }
+            } else {
+                eprintln!("MCP configuration file not found: {}", config_path.display());
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             rkllm,
+            mcp_client,
+            tool_detector: ToolCallDetector::new(),
             last_ctrl_c: Arc::new(Mutex::new(None)),
         })
     }
 
-    pub fn start(&self) -> Result<()> {
+    pub async fn start(&self) -> Result<()> {
         self.print_separator(Color::Rgb { r: 100, g: 149, b: 237 });
         self.print_banner();
 
         terminal::enable_raw_mode().context("Failed to enable raw mode")?;
+
         let mut stdout = stdout();
 
-        let result = self.run_chat_loop(&mut stdout);
+        let result = self.run_chat_loop(&mut stdout).await;
 
         terminal::disable_raw_mode().context("Failed to disable raw mode")?;
         println!(); // Final newline
@@ -50,7 +90,7 @@ impl ChatSession {
         result
     }
 
-    fn run_chat_loop(&self, stdout: &mut std::io::Stdout) -> Result<()> {
+    async fn run_chat_loop(&self, stdout: &mut std::io::Stdout) -> Result<()> {
         loop {
             // Display prompt
             self.print_separator(Color::Rgb { r: 100, g: 149, b: 237 });
@@ -73,6 +113,30 @@ impl ChatSession {
                 break;
             }
 
+            // MCPツールのテストコマンド
+            if trimmed.starts_with("/test-mcp") {
+                terminal::disable_raw_mode().context("Failed to disable raw mode")?;
+
+                if let Some(mcp_client) = &self.mcp_client {
+                    println!("\n[Testing MCP tool call...]");
+
+                    // テスト用のツール呼び出し
+                    let test_call = "[TOOL_CALL]\n{\n  \"name\": \"list_directory\",\n  \"arguments\": {\n    \"path\": \"/home/kumata/Documents\"\n  }\n}\n[END_TOOL_CALL]";
+
+                    println!("Simulating tool call:\n{}", test_call);
+
+                    match self.process_tool_calls(test_call).await {
+                        Ok(_) => println!("\n[Test completed successfully]"),
+                        Err(e) => eprintln!("\n[Test failed: {}]", e),
+                    }
+                } else {
+                    println!("\n[MCP is not enabled. Use --mcp-config to enable it.]");
+                }
+
+                terminal::enable_raw_mode().context("Failed to enable raw mode")?;
+                continue;
+            }
+
             // Disable raw mode temporarily for LLM output
             terminal::disable_raw_mode().context("Failed to disable raw mode")?;
 
@@ -80,7 +144,7 @@ impl ChatSession {
             let file_paths = file_detector::detect_file_paths(&trimmed);
 
             // プロンプトを構築
-            let prompt = if file_paths.is_empty() {
+            let mut prompt = if file_paths.is_empty() {
                 // ファイルがない場合はシンプルなプロンプト
                 prompt_builder::build_simple_prompt(&trimmed)
             } else {
@@ -102,6 +166,37 @@ impl ChatSession {
                 prompt_builder::build_prompt(&trimmed, &files, &errors)
             };
 
+            // MCPツール情報をプロンプトに追加
+            if let Some(mcp_client) = &self.mcp_client {
+                let tools = mcp_client.list_all_tools();
+                if !tools.is_empty() {
+                    let mut tool_info = String::from("\n## Available Tools\n\n");
+                    tool_info.push_str("You have access to the following tools. Use them when appropriate:\n\n");
+
+                    for (_server_name, tool) in &tools {
+                        tool_info.push_str(&format!(
+                            "- **{}**: {}\n",
+                            tool.name,
+                            tool.description.as_deref().unwrap_or("(no description)")
+                        ));
+                    }
+
+                    tool_info.push_str("\nTo use a tool, output the following format:\n\n");
+                    tool_info.push_str("[TOOL_CALL]\n");
+                    tool_info.push_str("{\n");
+                    tool_info.push_str("  \"name\": \"tool_name\",\n");
+                    tool_info.push_str("  \"arguments\": {\n");
+                    tool_info.push_str("    \"arg1\": \"value1\",\n");
+                    tool_info.push_str("    \"arg2\": \"value2\"\n");
+                    tool_info.push_str("  }\n");
+                    tool_info.push_str("}\n");
+                    tool_info.push_str("[END_TOOL_CALL]\n\n");
+
+                    // プロンプトの先頭にツール情報を追加
+                    prompt = tool_info + &prompt;
+                }
+            }
+
             self.print_separator(Color::Rgb { r: 100, g: 100, b: 100 });
             print!("\n🔹 ");
             io::stdout().flush().unwrap();
@@ -115,6 +210,13 @@ impl ChatSession {
                     // ファイル操作を処理
                     if let Err(e) = self.process_file_operations(&response) {
                         eprintln!("\nError processing file operations: {}", e);
+                    }
+
+                    // MCP ツール呼び出しを処理
+                    if self.mcp_client.is_some() {
+                        if let Err(e) = self.process_tool_calls(&response).await {
+                            eprintln!("\nError processing tool calls: {}", e);
+                        }
                     }
                 }
                 Err(e) => {
@@ -154,9 +256,8 @@ impl ChatSession {
 
                             // First Ctrl+C or timeout - show message and update time
                             *last_time = Some(now);
-                            let num_newlines = buffer.chars().filter(|&c| c == '\n').count();
                             execute!(stdout, Print("\r\n[Press Ctrl+C again to exit]\r\n❯ "))?;
-                            self.redraw_buffer(stdout, &buffer, num_newlines)?;
+                            execute!(stdout, Print(&buffer))?;
                         }
 
                         // Ctrl+D to exit
@@ -168,10 +269,10 @@ impl ChatSession {
                             return Ok(None);
                         }
 
-                        // Shift+Enter (detected as Ctrl+J) for newline
+                        // Shift+Enter for newline
                         KeyEvent {
-                            code: KeyCode::Char('j'),
-                            modifiers: KeyModifiers::CONTROL,
+                            code: KeyCode::Enter,
+                            modifiers: KeyModifiers::SHIFT,
                             ..
                         } => {
                             buffer.push('\n');
@@ -181,6 +282,7 @@ impl ChatSession {
                         // Enter to submit
                         KeyEvent {
                             code: KeyCode::Enter,
+                            modifiers: KeyModifiers::NONE,
                             ..
                         } => {
                             execute!(stdout, Print("\r\n"))?;
@@ -193,7 +295,6 @@ impl ChatSession {
                             ..
                         } => {
                             if buffer.pop().is_some() {
-                                // Simply move cursor back and clear from cursor to end
                                 execute!(
                                     stdout,
                                     cursor::MoveLeft(1),
@@ -213,39 +314,13 @@ impl ChatSession {
                         }
 
                         _ => {
-                            // Ignore other keys (Left, Right, etc.)
+                            // Ignore other keys
                         }
                     }
                     stdout.flush()?;
                 }
             }
         }
-    }
-
-    fn redraw_buffer(&self, stdout: &mut std::io::Stdout, buffer: &str, from_line: usize) -> Result<()> {
-        // Move up to the first line (where the "> " prompt is)
-        if from_line > 0 {
-            execute!(stdout, cursor::MoveUp(from_line as u16))?;
-        }
-
-        // Move to start of line and clear everything below
-        execute!(
-            stdout,
-            Print("\r"),
-            terminal::Clear(terminal::ClearType::FromCursorDown),
-            Print("❯ ")
-        )?;
-
-        // Print buffer, converting newlines to actual line breaks with indent
-        for c in buffer.chars() {
-            if c == '\n' {
-                execute!(stdout, Print("\r\n  "))?;
-            } else {
-                execute!(stdout, Print(c))?;
-            }
-        }
-
-        Ok(())
     }
 
     fn print_banner(&self) {
@@ -266,7 +341,7 @@ impl ChatSession {
         print!("{}", SetForegroundColor(cyan));
         print!("████████");
         print!("{}", ResetColor);
-        println!("   Use Shift+Enter for new lines.");
+        println!();
 
         print!("  ");
         print!("{}", SetForegroundColor(cyan));
@@ -348,6 +423,41 @@ impl ChatSession {
                         Err(e) => {
                             eprintln!("[Error writing '{}': {}]", op.path, e);
                         }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// LLMの応答からツール呼び出しを処理する
+    ///
+    /// # 引数
+    /// * `output` - LLMの出力テキスト
+    async fn process_tool_calls(&self, output: &str) -> Result<()> {
+        let tool_calls = self.tool_detector.detect(output);
+
+        if tool_calls.is_empty() {
+            return Ok(());
+        }
+
+        println!("\n[Detected {} tool call(s)]", tool_calls.len());
+
+        if let Some(client) = &self.mcp_client {
+            for call in tool_calls {
+                match client.call_tool(&call.name, call.arguments).await {
+                    Ok(result) => {
+                        if result.success {
+                            println!("\n[Tool '{}' output:]", call.name);
+                            println!("{}", result.output);
+                        } else {
+                            eprintln!("\n[Tool '{}' failed:]", call.name);
+                            eprintln!("{}", result.output);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("\n[Failed to call tool '{}': {}]", call.name, e);
                     }
                 }
             }
