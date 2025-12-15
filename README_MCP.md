@@ -25,6 +25,44 @@ MCP 設定ファイルを指定して起動します：
 ./target/release/rkllm-cli chat --model /path/to/model.rkllm --mcp-config mcp_config.toml
 ```
 
+```
+❯ ./ のファイル一覧を表示して
+───────────────────────────────────────────────────────────────────────────────
+🔹 [TOOL_CALL]
+{
+  "name": "list_directory",
+  "arguments": {
+    "path": "./"
+  }
+}
+[END_TOOL_CALL]
+
+
+[Detected 1 tool call(s)]
+[MCP: Calling tool 'list_directory' on server 'filesystem']
+[MCP: Tool 'list_directory' completed successfully]
+
+[Tool 'list_directory' output:]
+[DIR] .git
+[FILE] .gitignore
+[FILE] CLAUDE.md
+[FILE] Cargo.lock
+[FILE] Cargo.toml
+[FILE] LICENSE
+[FILE] README-ja.md
+[FILE] README.md
+[FILE] README_MCP.md
+[FILE] build.rs
+[DIR] docs
+[DIR] examples
+[FILE] mcp_config.toml
+[FILE] mcp_config.toml.sample
+[DIR] sample
+[DIR] src
+[DIR] target
+[FILE] test_file.txt
+```
+
 ### 3. ツールを使う
 
 LLM にツールの使用を指示します。ツール呼び出しは以下の形式で検出されます：
