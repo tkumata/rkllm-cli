@@ -17,6 +17,8 @@ use std::io::{self, stdout, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 pub struct ChatSession {
     rkllm: RKLLM,
@@ -230,7 +232,28 @@ impl ChatSession {
     }
 
     fn read_multiline_input(&self, stdout: &mut std::io::Stdout) -> Result<Option<String>> {
+        const PROMPT: &str = "❯ ";
+        const INDENT: &str = "  ";
+        let prompt_width = UnicodeWidthStr::width(PROMPT);
+        let indent_width = UnicodeWidthStr::width(INDENT);
+
+        // プロンプト行を起点に、毎回カーソルを戻して全体再描画する。
+        let mut rendered_rows: usize = 1; // プロンプトのみの1行
         let mut buffer = String::new();
+
+        let redraw = |stdout: &mut std::io::Stdout,
+                      rendered_rows: &mut usize,
+                      buffer: &str|
+         -> Result<()> {
+            // 前回の表示開始位置（プロンプト行の先頭）に戻る
+            execute!(stdout, cursor::MoveToColumn(0))?;
+            if *rendered_rows > 1 {
+                execute!(stdout, cursor::MoveUp((*rendered_rows - 1) as u16))?;
+            }
+            let rows_used = render_input(stdout, PROMPT, INDENT, prompt_width, indent_width, buffer)?;
+            *rendered_rows = rows_used;
+            Ok(())
+        };
 
         loop {
             if event::poll(std::time::Duration::from_millis(100))? {
@@ -254,8 +277,10 @@ impl ChatSession {
 
                             // First Ctrl+C or timeout - show message and update time
                             *last_time = Some(now);
-                            execute!(stdout, Print("\r\n[Press Ctrl+C again to exit]\r\n❯ "))?;
-                            execute!(stdout, Print(&buffer))?;
+                            execute!(stdout, Print("\r\n[Press Ctrl+C again to exit]\r\n"))?;
+                            execute!(stdout, Print(PROMPT))?;
+                            rendered_rows = 1;
+                            redraw(stdout, &mut rendered_rows, &buffer)?;
                         }
 
                         // Ctrl+D to exit
@@ -274,7 +299,7 @@ impl ChatSession {
                             ..
                         } => {
                             buffer.push('\n');
-                            execute!(stdout, Print("\r\n  "))?;
+                            redraw(stdout, &mut rendered_rows, &buffer)?;
                         }
 
                         // Enter to submit
@@ -283,6 +308,7 @@ impl ChatSession {
                             modifiers: KeyModifiers::NONE,
                             ..
                         } => {
+                            redraw(stdout, &mut rendered_rows, &buffer)?;
                             execute!(stdout, Print("\r\n"))?;
                             return Ok(Some(buffer));
                         }
@@ -292,12 +318,8 @@ impl ChatSession {
                             code: KeyCode::Backspace,
                             ..
                         } => {
-                            if buffer.pop().is_some() {
-                                execute!(
-                                    stdout,
-                                    cursor::MoveLeft(1),
-                                    terminal::Clear(terminal::ClearType::FromCursorDown)
-                                )?;
+                            if pop_last_grapheme_width(&mut buffer).is_some() {
+                                redraw(stdout, &mut rendered_rows, &buffer)?;
                             }
                         }
 
@@ -308,7 +330,7 @@ impl ChatSession {
                             ..
                         } => {
                             buffer.push(c);
-                            execute!(stdout, Print(c))?;
+                            redraw(stdout, &mut rendered_rows, &buffer)?;
                         }
 
                         _ => {
@@ -608,6 +630,62 @@ impl ChatSession {
 
 }
 
+fn pop_last_grapheme_width(buffer: &mut String) -> Option<usize> {
+    let mut iter = buffer.grapheme_indices(true);
+    if let Some((idx, grapheme)) = iter.next_back() {
+        let width = UnicodeWidthStr::width(grapheme);
+        buffer.truncate(idx);
+        Some(width)
+    } else {
+        None
+    }
+}
+
+fn render_input(
+    stdout: &mut std::io::Stdout,
+    prompt: &str,
+    indent: &str,
+    prompt_width: usize,
+    indent_width: usize,
+    buffer: &str,
+) -> Result<usize> {
+    let term_width = terminal::size().map(|(w, _)| w as usize).unwrap_or(80).max(1);
+
+    // 先頭に戻して以降をクリア
+    execute!(
+        stdout,
+        cursor::MoveToColumn(0),
+        terminal::Clear(terminal::ClearType::FromCursorDown),
+        Print(prompt)
+    )?;
+
+    let mut col = prompt_width;
+    let mut rows_used = 1usize;
+
+    for grapheme in buffer.graphemes(true) {
+        if grapheme == "\n" {
+            execute!(stdout, Print("\r\n"), Print(indent))?;
+            rows_used += 1;
+            col = indent_width;
+            continue;
+        }
+
+        let w = UnicodeWidthStr::width(grapheme).max(1);
+        if col + w > term_width {
+            execute!(stdout, Print("\r\n"), Print(indent))?;
+            rows_used += 1;
+            col = indent_width;
+        }
+
+        execute!(stdout, Print(grapheme))?;
+        col += w;
+    }
+
+    execute!(stdout, cursor::MoveToColumn(col as u16))?;
+    stdout.flush()?;
+    Ok(rows_used)
+}
+
 /// 出力専用と推定できるキーワードを含むか判定
 fn likely_output_only(input: &str) -> bool {
     let lower = input.to_lowercase();
@@ -623,4 +701,37 @@ fn contents_equal(a: &str, b: &str) -> bool {
         s.replace("\r\n", "\n").trim_end().to_string()
     }
     normalize(a) == normalize(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pop_last_grapheme_width;
+
+    #[test]
+    fn pop_ascii_grapheme() {
+        let mut buffer = "abc".to_string();
+        assert_eq!(pop_last_grapheme_width(&mut buffer), Some(1));
+        assert_eq!(buffer, "ab");
+    }
+
+    #[test]
+    fn pop_fullwidth_grapheme() {
+        let mut buffer = "あい".to_string();
+        assert_eq!(pop_last_grapheme_width(&mut buffer), Some(2));
+        assert_eq!(buffer, "あ");
+    }
+
+    #[test]
+    fn pop_emoji_grapheme() {
+        let mut buffer = "ok😊".to_string();
+        assert_eq!(pop_last_grapheme_width(&mut buffer), Some(2));
+        assert_eq!(buffer, "ok");
+    }
+
+    #[test]
+    fn pop_combining_grapheme() {
+        let mut buffer = "e\u{0301}".to_string(); // e + combining acute
+        assert_eq!(pop_last_grapheme_width(&mut buffer), Some(1));
+        assert_eq!(buffer, "");
+    }
 }
