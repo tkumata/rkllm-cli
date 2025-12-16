@@ -8,14 +8,18 @@ This project provides a command-line interface to interact with Large Language M
 
 I couldn't understand why Rockchip's samples use the adb command. That's why I created this program. I want to use the NPU on rock5B.
 
+Please use the Qwen3 1.7B model.
+
 ## Features
 
 - **Interactive Chat**: Command-line chat interface with streaming output
 - **Safe Rust Wrapper**: Type-safe Rust bindings for the C library
 - **UTF-8 Handling**: Proper handling of incomplete multi-byte UTF-8 sequences during streaming
 - **Error Handling**: Comprehensive error handling with `anyhow`
-- **Reading Files**: ✨ Read local files and hand over to LLM model
-- **Writing files**: ✨ Write local file via LLM model
+- **File in/out pipeline**: Read specified files → transform (translate/summarize/append) → write to specified output paths. Source files are not overwritten unless explicitly instructed.
+- **Writing files**: ✨ Write local files via `<file path="..."> ... </file>` format (bracket format is also accepted)
+- **Prompt preview & write confirmation**: `--preview-prompt` (or `RKLLM_DEBUG_PROMPT=1`) to print the composed prompt, `--confirm-writes` to ask before every write.
+- **MCP client**: Connect to MCP server; tool list is shown in short form by default (set `RKLLM_HIDE_TOOL_LIST=1` to hide, `RKLLM_SHOW_TOOL_LIST_FULL=1` for full details).
 
 ## Prerequisites
 
@@ -76,6 +80,11 @@ The binary will be located at:
 
 ```bash
 ./target/release/rkllm-cli chat --model /path/to/your/model.rkllm
+
+# Common flags
+--mcp-config mcp_config.toml    # enable MCP tools
+--preview-prompt                # print the composed prompt before sending
+--confirm-writes                # ask before every file write
 ```
 
 ### Example
@@ -127,6 +136,7 @@ rkllm-cli/
 - Interactive readline-based interface using `rustyline`
 - Streaming output support
 - Command history
+- File operations: detects referenced paths, loads existing files as context, treats missing paths as output targets, and remaps single-target outputs when the model writes to the input path.
 
 ## Configuration
 

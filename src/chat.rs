@@ -3,7 +3,7 @@ use crate::file_ops;
 use crate::file_output_parser;
 use crate::llm::{RKLLMConfig, RKLLM};
 use crate::mcp::{McpClient, McpConfig};
-use crate::prompt_builder;
+use crate::prompt_builder::{build_chat_prompt, has_file_operation_intent};
 use crate::tool_detector::ToolCallDetector;
 use anyhow::{Context, Result};
 use crossterm::{
@@ -23,10 +23,17 @@ pub struct ChatSession {
     mcp_client: Option<McpClient>,
     tool_detector: ToolCallDetector,
     last_ctrl_c: Arc<Mutex<Option<Instant>>>,
+    preview_prompt: bool,
+    confirm_writes: bool,
 }
 
 impl ChatSession {
-    pub async fn new(model_path: String, mcp_config_path: Option<PathBuf>) -> Result<Self> {
+    pub async fn new(
+        model_path: String,
+        mcp_config_path: Option<PathBuf>,
+        preview_prompt: bool,
+        confirm_writes: bool,
+    ) -> Result<Self> {
         let config = RKLLMConfig {
             model_path,
             ..Default::default()
@@ -71,6 +78,8 @@ impl ChatSession {
             mcp_client,
             tool_detector: ToolCallDetector::new(),
             last_ctrl_c: Arc::new(Mutex::new(None)),
+            preview_prompt,
+            confirm_writes,
         })
     }
 
@@ -118,84 +127,72 @@ impl ChatSession {
 
             // ファイルパスを検出
             let file_paths = file_detector::detect_file_paths(&trimmed);
+            let has_file_op_intent = has_file_operation_intent(&trimmed);
 
-            // プロンプトを構築
-            let mut prompt = if file_paths.is_empty() {
-                // ファイルがない場合はシンプルなプロンプト
-                prompt_builder::build_simple_prompt(&trimmed)
-            } else {
-                // ファイルを読み込む
+            // ファイル読み込み（既存ファイルのみ）、未存在は出力ターゲットとして扱う
+            let mut provided_files = std::collections::HashMap::new();
+            let mut output_targets = Vec::new();
+            let mut files = Vec::new();
+            let mut errors = Vec::new();
+
+            if !file_paths.is_empty() {
+                // 入出力の推定: ファイル操作意図があり、2つ以上のファイルが指定された場合は
+                // 先頭を入力、それ以降を出力ターゲットとして扱う。
+                // 単一ファイルかつファイル操作意図が強い場合（保存/書き込みなどを含む）は出力優先。
+                let mut input_candidates = Vec::new();
+                let mut output_candidates = Vec::new();
+
+                if has_file_op_intent && file_paths.len() >= 2 {
+                    let mut iter = file_paths.iter();
+                    if let Some(first) = iter.next() {
+                        input_candidates.push(first.clone());
+                    }
+                    for p in iter {
+                        output_candidates.push(p.clone());
+                    }
+                } else if has_file_op_intent && likely_output_only(&trimmed) {
+                    output_candidates.extend(file_paths.clone());
+                } else {
+                    input_candidates.extend(file_paths.clone());
+                }
+
                 println!("\n[Detected files: {}]", file_paths.join(", "));
-                let (files, errors) = file_ops::read_files(&file_paths);
 
-                // 成功したファイルを表示
+                for path in &input_candidates {
+                    if file_ops::file_exists(path) {
+                        match file_ops::read_file(path) {
+                            Ok(content) => {
+                                provided_files.insert(content.original_path.clone(), content.content.clone());
+                                files.push(content);
+                            }
+                            Err(e) => errors.push((path.clone(), e.to_string())),
+                        }
+                    } else {
+                        errors.push((path.clone(), "File not found".to_string()));
+                    }
+                }
+
+                output_targets.extend(output_candidates);
+
                 if !files.is_empty() {
                     println!("[Successfully loaded {} file(s)]", files.len());
                 }
-
-                // エラーを表示
                 for (path, error) in &errors {
                     eprintln!("[Error loading '{}': {}]", path, error);
                 }
-
-                // プロンプトを構築
-                prompt_builder::build_prompt(&trimmed, &files, &errors)
-            };
-
-            // MCPツール情報をプロンプトに追加
-            if let Some(mcp_client) = &self.mcp_client {
-                let tools = mcp_client.list_all_tools();
-                if !tools.is_empty() {
-                    let mut tool_info = String::from("\n## Available Tools\n\n");
-                    tool_info.push_str("You have access to the following tools. Use them when appropriate:\n\n");
-
-                    for (_server_name, tool) in &tools {
-                        tool_info.push_str(&format!("### {}\n", tool.name));
-                        if let Some(desc) = &tool.description {
-                            tool_info.push_str(&format!("{}\n\n", desc));
-                        }
-
-                        // スキーマから引数情報を取得
-                        tool_info.push_str("Arguments:\n");
-                        if let Some(properties) = &tool.input_schema.properties {
-                            for (arg_name, arg_schema) in properties {
-                                let arg_type = arg_schema.get("type")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("string");
-                                let arg_desc = arg_schema.get("description")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-
-                                let required_mark = if tool.input_schema.required.as_ref()
-                                    .map(|r| r.contains(arg_name))
-                                    .unwrap_or(false) {
-                                    " (required)"
-                                } else {
-                                    ""
-                                };
-
-                                tool_info.push_str(&format!(
-                                    "- `{}` ({}){}: {}\n",
-                                    arg_name, arg_type, required_mark, arg_desc
-                                ));
-                            }
-                        }
-                        tool_info.push_str("\n");
-                    }
-
-                    tool_info.push_str("To use a tool, output:\n\n");
-                    tool_info.push_str("[TOOL_CALL]\n");
-                    tool_info.push_str("{\n");
-                    tool_info.push_str("  \"name\": \"tool_name\",\n");
-                    tool_info.push_str("  \"arguments\": {\n");
-                    tool_info.push_str("    \"argument_name\": \"value\"\n");
-                    tool_info.push_str("  }\n");
-                    tool_info.push_str("}\n");
-                    tool_info.push_str("[END_TOOL_CALL]\n\n");
-
-                    // プロンプトの先頭にツール情報を追加
-                    prompt = tool_info + &prompt;
+                if !output_targets.is_empty() {
+                    println!("[Treating as output targets (not loaded): {}]", output_targets.join(", "));
                 }
+            }
+
+            let tool_info = self.build_tool_info();
+
+            // プロンプトを構築（system/user/context/tools の4段）
+            let prompt =
+                build_chat_prompt(&trimmed, &files, &errors, tool_info.as_deref(), &output_targets);
+            if self.preview_prompt || std::env::var("RKLLM_DEBUG_PROMPT").is_ok() {
+                eprintln!("\n[DEBUG prompt length={}]", prompt.len());
+                eprintln!("{}", prompt);
             }
 
             self.print_separator(Color::Rgb { r: 100, g: 100, b: 100 });
@@ -209,7 +206,7 @@ impl ChatSession {
                     println!(); // Add a newline after the response
 
                     // ファイル操作を処理
-                    if let Err(e) = self.process_file_operations(&response) {
+                    if let Err(e) = self.process_file_operations(&response, &provided_files, &output_targets) {
                         eprintln!("\nError processing file operations: {}", e);
                     }
 
@@ -364,6 +361,81 @@ impl ChatSession {
         print!("{}", ResetColor);
     }
 
+    fn build_tool_info(&self) -> Option<String> {
+        // デフォルトは短縮版を表示。環境変数で抑止/詳細化。
+        let hide = std::env::var("RKLLM_HIDE_TOOL_LIST").is_ok();
+        let show_full = std::env::var("RKLLM_SHOW_TOOL_LIST_FULL").is_ok();
+        let show_short = std::env::var("RKLLM_SHOW_TOOL_LIST").is_ok() || (!hide && !show_full);
+        if hide || (!show_short && !show_full) {
+            return None;
+        }
+
+        let Some(mcp_client) = &self.mcp_client else {
+            return None;
+        };
+        let tools = mcp_client.list_all_tools();
+        if tools.is_empty() {
+            return None;
+        }
+
+        let mut info = String::from("\n## Available Tools\n\n");
+        if show_full {
+            info.push_str("You have access to the following tools. Use them when appropriate:\n\n");
+        } else {
+            info.push_str("Available tools (short list):\n\n");
+        }
+
+        for (_server_name, tool) in &tools {
+            info.push_str(&format!("### {}\n", tool.name));
+            if let Some(desc) = &tool.description {
+                info.push_str(&format!("{}\n", desc));
+            }
+            if show_full {
+                info.push_str("\nArguments:\n");
+                if let Some(properties) = &tool.input_schema.properties {
+                    for (arg_name, arg_schema) in properties {
+                        let arg_type = arg_schema
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("string");
+                        let arg_desc = arg_schema
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let required_mark = if tool
+                            .input_schema
+                            .required
+                            .as_ref()
+                            .map(|r| r.contains(arg_name))
+                            .unwrap_or(false)
+                        {
+                            " (required)"
+                        } else {
+                            ""
+                        };
+                        info.push_str(&format!(
+                            "- `{}` ({}){}: {}\n",
+                            arg_name, arg_type, required_mark, arg_desc
+                        ));
+                    }
+                }
+                info.push_str("\n");
+            }
+        }
+
+        info.push_str("\nTo use a tool, output:\n\n");
+        info.push_str("[TOOL_CALL]\n");
+        info.push_str("{\n");
+        info.push_str("  \"name\": \"tool_name\",\n");
+        info.push_str("  \"arguments\": {\n");
+        info.push_str("    \"argument_name\": \"value\"\n");
+        info.push_str("  }\n");
+        info.push_str("}\n");
+        info.push_str("[END_TOOL_CALL]\n");
+
+        Some(info)
+    }
+
     /// ファイル上書きの確認を求める
     ///
     /// # 引数
@@ -372,7 +444,24 @@ impl ChatSession {
     /// # 戻り値
     /// ユーザーが'y'を入力した場合はtrue、それ以外はfalse
     fn confirm_overwrite(&self, path: &str) -> Result<bool> {
-        print!("\n[File '{}' already exists. Overwrite? (y/N): ", path);
+        self.prompt_confirm(&format!(
+            "\n[File '{}' already exists. Overwrite? (y/N): ",
+            path
+        ))
+    }
+
+    /// 書き込み確認（--confirm-writes 用）
+    fn confirm_write(&self, path: &str, exists: bool) -> Result<bool> {
+        let prefix = if exists {
+            "[File exists]"
+        } else {
+            "[Write]"
+        };
+        self.prompt_confirm(&format!("\n{} '{}' ? (y/N): ", prefix, path))
+    }
+
+    fn prompt_confirm(&self, message: &str) -> Result<bool> {
+        print!("{}", message);
         io::stdout().flush()?;
 
         // 一時的にraw modeを無効化
@@ -396,8 +485,15 @@ impl ChatSession {
     ///
     /// # 引数
     /// * `output` - LLMの出力テキスト
-    fn process_file_operations(&self, output: &str) -> Result<()> {
-        let operations = file_output_parser::parse_file_operations(output);
+    /// * `provided_files` - 入力として読み込んだファイル内容
+    /// * `output_targets` - 入力で未存在だった出力候補パス
+    fn process_file_operations(
+        &self,
+        output: &str,
+        provided_files: &std::collections::HashMap<String, String>,
+        output_targets: &[String],
+    ) -> Result<()> {
+        let mut operations = file_output_parser::parse_file_operations(output);
 
         if operations.is_empty() {
             return Ok(());
@@ -405,15 +501,58 @@ impl ChatSession {
 
         println!("\n[Detected {} file operation(s)]", operations.len());
 
+        // 入力と同一内容はスキップ
+        operations = operations
+            .into_iter()
+            .filter(|op| {
+                if let Some((input_path, _)) =
+                    provided_files
+                        .iter()
+                        .find(|(_, content)| contents_equal(content, &op.content))
+                {
+                    println!(
+                        "[Skipped unchanged (matches input {}): {}]",
+                        input_path, op.path
+                    );
+                    return false;
+                }
+                true
+            })
+            .collect();
+
+        if operations.is_empty() {
+            println!("[No file operations after filtering unchanged content]");
+            return Ok(());
+        }
+
+        // もし出力パスが未指定で、かつ出力ターゲットが1つだけならリマップ
+        if !output_targets.is_empty() && output_targets.len() == 1 {
+            let target = &output_targets[0];
+            let all_input_paths: bool = operations
+                .iter()
+                .all(|op| provided_files.contains_key(&op.path));
+            if all_input_paths {
+                for op in operations.iter_mut() {
+                    println!("[Remap {} -> {}]", op.path, target);
+                    op.path = target.clone();
+                }
+            }
+        }
+
         for op in operations {
             match op.operation_type {
                 file_output_parser::FileOperationType::Create => {
-                    // ファイルが既に存在する場合は確認
-                    if file_ops::file_exists(&op.path) {
-                        if !self.confirm_overwrite(&op.path)? {
-                            println!("[Skipped: {}]", op.path);
+                    let exists = file_ops::file_exists(&op.path);
+
+                    // 書き込み前の確認
+                    if self.confirm_writes {
+                        if !self.confirm_write(&op.path, exists)? {
+                            println!("[Skipped by confirm: {}]", op.path);
                             continue;
                         }
+                    } else if exists && !self.confirm_overwrite(&op.path)? {
+                        println!("[Skipped: {}]", op.path);
+                        continue;
                     }
 
                     // ファイルを書き込む
@@ -467,4 +606,21 @@ impl ChatSession {
         Ok(())
     }
 
+}
+
+/// 出力専用と推定できるキーワードを含むか判定
+fn likely_output_only(input: &str) -> bool {
+    let lower = input.to_lowercase();
+    let hints = [
+        "保存", "書き", "出力", "生成", "作成", "save", "write", "output", "generate", "create",
+    ];
+    hints.iter().any(|kw| lower.contains(kw))
+}
+
+/// 改行差分や末尾空白を無視して内容一致を判定
+fn contents_equal(a: &str, b: &str) -> bool {
+    fn normalize(s: &str) -> String {
+        s.replace("\r\n", "\n").trim_end().to_string()
+    }
+    normalize(a) == normalize(b)
 }

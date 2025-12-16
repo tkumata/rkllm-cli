@@ -32,9 +32,9 @@ impl Default for RKLLMConfig {
             model_path: String::new(),
             max_context_len: 4096,
             max_new_tokens: 4096,
-            top_k: 20,              // default 1
-            top_p: 0.8,             // default 0.9
-            temperature: 0.7,       // default 0.8
+            top_k: 64,              // default 1
+            top_p: 0.95,            // default 0.9
+            temperature: 1.0,       // default 0.8
             repeat_penalty: 1.0,    // default 1.1
             frequency_penalty: 0.0,
             presence_penalty: 0.0,  // default 0.0

@@ -31,6 +31,14 @@ enum Commands {
         /// Path to MCP configuration file (optional)
         #[arg(long)]
         mcp_config: Option<PathBuf>,
+
+        /// Print the composed prompt before sending it to the model
+        #[arg(long)]
+        preview_prompt: bool,
+
+        /// Ask confirmation before every file write
+        #[arg(long)]
+        confirm_writes: bool,
     },
 }
 
@@ -39,7 +47,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Chat { model, mcp_config } => {
+        Commands::Chat {
+            model,
+            mcp_config,
+            preview_prompt,
+            confirm_writes,
+        } => {
             if !model.exists() {
                 eprintln!("Error: Model file not found: {}", model.display());
                 std::process::exit(1);
@@ -53,7 +66,13 @@ async fn main() -> Result<()> {
             println!("Loading model: {}", model_path);
             println!("Initializing RKLLM...");
 
-            let session = chat::ChatSession::new(model_path, mcp_config).await?;
+            let session = chat::ChatSession::new(
+                model_path,
+                mcp_config,
+                preview_prompt,
+                confirm_writes,
+            )
+            .await?;
 
             println!("Model loaded successfully!");
             println!();

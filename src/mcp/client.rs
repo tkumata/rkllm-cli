@@ -238,6 +238,11 @@ impl McpClient {
             .collect()
     }
 
+    /// Check if any connected server exposes a given tool
+    pub fn has_tool(&self, tool_name: &str) -> bool {
+        self.find_server_for_tool(tool_name).is_some()
+    }
+
     /// Find which server provides a tool with the given name
     fn find_server_for_tool(&self, tool_name: &str) -> Option<&ServerConnection> {
         for connection in self.servers.values() {

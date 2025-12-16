@@ -17,7 +17,7 @@ impl ToolCallDetector {
         Self {
             // JSON style: [TOOL_CALL] {...} [END_TOOL_CALL]
             json_pattern: Regex::new(
-                r"\[TOOL_CALL\]\s*(\{[\s\S]*\})\s*\[END_TOOL_CALL\]"
+                r"(?s)\[TOOL_CALL\]\s*(\{.*?\})\s*\[END_TOOL_CALL\]"
             ).unwrap(),
             // XML style: <tool_call name="...">...</tool_call>
             xml_pattern: Regex::new(
