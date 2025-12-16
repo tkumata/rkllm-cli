@@ -6,9 +6,9 @@ use std::ptr;
 use std::sync::{Arc, Mutex};
 
 // Gemma chat template
-// const GEMMA_TEMPLATE: &str = "<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n";
+const GEMMA_TEMPLATE: &str = "<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n";
 // Qwen chat template
-const GEMMA_TEMPLATE: &str = "<|im_start|>system\nあなたは真面目だけど少しお茶目で優秀なAIです。正確な情報を提供します。必ず日本語で答えてください。<|im_end|><|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n";
+// const GEMMA_TEMPLATE: &str = "<|im_start|>system\nあなたは真面目だけど少しお茶目で優秀なAIです。正確な情報を提供します。必ず日本語で答えてください。<|im_end|><|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n";
 
 pub struct RKLLMConfig {
     pub model_path: String,
@@ -32,9 +32,9 @@ impl Default for RKLLMConfig {
             model_path: String::new(),
             max_context_len: 4096,
             max_new_tokens: 4096,
-            top_k: 20,              // default 1
-            top_p: 0.8,             // default 0.9
-            temperature: 0.7,       // default 0.8
+            top_k: 64,              // default 1
+            top_p: 0.95,            // default 0.9
+            temperature: 1.0,       // default 0.8
             repeat_penalty: 1.0,    // default 1.1
             frequency_penalty: 0.0,
             presence_penalty: 0.0,  // default 0.0

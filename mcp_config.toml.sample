@@ -1,0 +1,13 @@
+# MCP configuration file for RKLLM CLI
+#
+# This file defines MCP servers that provide tools for the LLM to use.
+#
+# Example configuration:
+
+# Uncomment this section to enable the filesystem server
+# [[servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/Documents"]
+
+# Add more servers here as needed

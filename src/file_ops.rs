@@ -9,9 +9,6 @@ const MAX_FILE_SIZE: u64 = 1_048_576;
 /// ファイル読み込みの結果
 #[derive(Debug, Clone)]
 pub struct FileContent {
-    /// ファイルパス（解決後の絶対パス）
-    #[allow(dead_code)]
-    pub path: PathBuf,
     /// ファイルの内容
     pub content: String,
     /// 元のパス（ユーザーが指定したパス）
@@ -130,7 +127,6 @@ pub fn read_file(path: &str) -> Result<FileContent> {
         .with_context(|| format!("Failed to read file (not UTF-8 encoded?): {}", path))?;
 
     Ok(FileContent {
-        path: resolved_path,
         content,
         original_path: path.to_string(),
     })
