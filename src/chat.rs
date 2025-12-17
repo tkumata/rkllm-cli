@@ -1,3 +1,4 @@
+use crate::config::AppConfig;
 use crate::file_detector;
 use crate::file_ops;
 use crate::file_output_parser;
@@ -27,6 +28,7 @@ pub struct ChatSession {
     last_ctrl_c: Arc<Mutex<Option<Instant>>>,
     preview_prompt: bool,
     confirm_writes: bool,
+    config: AppConfig,
 }
 
 impl ChatSession {
@@ -82,6 +84,7 @@ impl ChatSession {
             last_ctrl_c: Arc::new(Mutex::new(None)),
             preview_prompt,
             confirm_writes,
+            config: AppConfig::load(),
         })
     }
 
@@ -126,12 +129,15 @@ impl ChatSession {
                 break;
             }
 
+            let has_file_op_intent = has_file_operation_intent(&trimmed);
+            let file_paths = if has_file_op_intent && !self.config.detect_extensions.is_empty() {
+                file_detector::detect_file_paths_with_exts(&trimmed, &self.config.detect_extensions)
+            } else {
+                Vec::new()
+            };
+
             // Disable raw mode temporarily for LLM output
             terminal::disable_raw_mode().context("Failed to disable raw mode")?;
-
-            // ファイルパスを検出
-            let file_paths = file_detector::detect_file_paths(&trimmed);
-            let has_file_op_intent = has_file_operation_intent(&trimmed);
 
             // ファイル読み込み（既存ファイルのみ）、未存在は出力ターゲットとして扱う
             let mut provided_files = std::collections::HashMap::new();
@@ -192,8 +198,14 @@ impl ChatSession {
             let tool_info = self.build_tool_info();
 
             // プロンプトを構築（system/user/context/tools の4段）
-            let prompt =
-                build_chat_prompt(&trimmed, &files, &errors, tool_info.as_deref(), &output_targets);
+            let prompt = build_chat_prompt(
+                &trimmed,
+                &files,
+                &errors,
+                tool_info.as_deref(),
+                &output_targets,
+                has_file_op_intent,
+            );
             if self.preview_prompt || std::env::var("RKLLM_DEBUG_PROMPT").is_ok() {
                 eprintln!("\n[DEBUG prompt length={}]", prompt.len());
                 eprintln!("{}", prompt);
@@ -209,9 +221,11 @@ impl ChatSession {
                 Ok(response) => {
                     println!(); // Add a newline after the response
 
-                    // ファイル操作を処理
-                    if let Err(e) = self.process_file_operations(&response, &provided_files, &output_targets) {
-                        eprintln!("\nError processing file operations: {}", e);
+                    // ファイル操作を処理（ユーザーに意図がある場合のみ）
+                    if has_file_op_intent {
+                        if let Err(e) = self.process_file_operations(&response, &provided_files, &output_targets) {
+                            eprintln!("\nError processing file operations: {}", e);
+                        }
                     }
 
                     // MCP ツール呼び出しを処理

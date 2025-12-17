@@ -1,4 +1,5 @@
 mod chat;
+mod config;
 mod ffi;
 mod file_detector;
 mod file_ops;
