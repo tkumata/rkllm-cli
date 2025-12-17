@@ -7,7 +7,7 @@ The <files> section is read-only context. Do NOT echo it back. Only create or mo
 When the user asks for translation/summarization/rewriting, transform the content accordingly. Do NOT copy the input verbatim unless explicitly instructed.
 If output targets are provided, write results to those paths and do not overwrite the source file unless the user says so.
 Use available MCP tools for environment actions (e.g., listing files) instead of fabricating content when tools are provided.
-Use the output format <file path="..."> ... </file> for file writes. Do not overwrite input files unless explicitly permitted.
+If the user does NOT explicitly ask to create/modify/save files, respond normally and NEVER use <file>...</file> blocks.
 "#;
 
 /// ファイル操作の指示（システムプロンプトの補足）
@@ -92,7 +92,14 @@ pub fn has_file_operation_intent(input: &str) -> bool {
 /// </user_input>
 /// ```
 pub fn build_prompt(user_input: &str, files: &[FileContent], errors: &[(String, String)]) -> String {
-    build_chat_prompt(user_input, files, errors, None, &[])
+    build_chat_prompt(
+        user_input,
+        files,
+        errors,
+        None,
+        &[],
+        has_file_operation_intent(user_input),
+    )
 }
 
 /// シンプルなプロンプトを構築（ファイルなし）
@@ -103,7 +110,14 @@ pub fn build_prompt(user_input: &str, files: &[FileContent], errors: &[(String, 
 /// # 戻り値
 /// ユーザー入力を含むプロンプト（ファイル操作の意図がある場合のみインストラクション付き）
 pub fn build_simple_prompt(user_input: &str) -> String {
-    build_chat_prompt(user_input, &[], &[], None, &[])
+    build_chat_prompt(
+        user_input,
+        &[],
+        &[],
+        None,
+        &[],
+        has_file_operation_intent(user_input),
+    )
 }
 
 /// 役割分離版のチャットプロンプトを構築
@@ -118,6 +132,7 @@ pub fn build_chat_prompt(
     errors: &[(String, String)],
     tool_info: Option<&str>,
     output_targets: &[String],
+    has_file_op_intent: bool,
 ) -> String {
     let mut prompt = String::new();
 
@@ -125,7 +140,7 @@ pub fn build_chat_prompt(
     prompt.push_str("<system>\n");
     prompt.push_str(SYSTEM_INSTRUCTIONS);
     prompt.push_str("\n");
-    if has_file_operation_intent(user_input) {
+    if has_file_op_intent {
         prompt.push_str(FILE_OPERATION_INSTRUCTIONS);
         prompt.push_str("\n");
     }
@@ -296,6 +311,7 @@ mod tests {
             &[],
             None,
             &["b.txt".to_string()],
+            true,
         );
         assert!(prompt.contains("<output_targets>"));
         assert!(prompt.contains("<target>b.txt</target>"));

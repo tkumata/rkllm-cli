@@ -15,6 +15,7 @@ path-absolutize = "3.1"
 mime_guess = "2.0"
 unicode-segmentation = "1.11"
 unicode-width = "0.1"
+directories = "5"
 
 # MCP (Model Context Protocol) support
 serde = { version = "1.0", features = ["derive"] }
