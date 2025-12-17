@@ -292,6 +292,16 @@ impl ChatSession {
                             return Ok(None);
                         }
 
+                        // 一部端末（例: macOS/iTerm2）で Shift+Enter が Ctrl+J として送られるケース
+                        KeyEvent {
+                            code: KeyCode::Char('j'),
+                            modifiers,
+                            ..
+                        } if modifiers.contains(KeyModifiers::CONTROL) => {
+                            buffer.push('\n');
+                            redraw(stdout, &mut rendered_rows, &buffer)?;
+                        }
+
                         // Shift+Enter for newline
                         KeyEvent {
                             code: KeyCode::Enter,
