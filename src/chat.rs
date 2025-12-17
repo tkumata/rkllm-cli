@@ -8,7 +8,7 @@ use crate::tool_detector::ToolCallDetector;
 use anyhow::{Context, Result};
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     style::{Color, Print, SetForegroundColor, ResetColor},
     terminal::{self},
@@ -92,9 +92,11 @@ impl ChatSession {
         terminal::enable_raw_mode().context("Failed to enable raw mode")?;
 
         let mut stdout = stdout();
+        execute!(stdout, EnableBracketedPaste).context("Failed to enable bracketed paste")?;
 
         let result = self.run_chat_loop(&mut stdout).await;
 
+        execute!(stdout, DisableBracketedPaste).context("Failed to disable bracketed paste")?;
         terminal::disable_raw_mode().context("Failed to disable raw mode")?;
         println!(); // Final newline
 
@@ -257,8 +259,8 @@ impl ChatSession {
 
         loop {
             if event::poll(std::time::Duration::from_millis(100))? {
-                if let Event::Key(key_event) = event::read()? {
-                    match key_event {
+                match event::read()? {
+                    Event::Key(key_event) => match key_event {
                         // Ctrl+C - need to press twice within 2 seconds to exit
                         KeyEvent {
                             code: KeyCode::Char('c'),
@@ -346,9 +348,18 @@ impl ChatSession {
                         _ => {
                             // Ignore other keys
                         }
+                    },
+                    Event::Paste(content) => {
+                        // Normalize CRLF/CR to LF so表示が潰れない
+                        let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+                        buffer.push_str(&normalized);
+                        redraw(stdout, &mut rendered_rows, &buffer)?;
                     }
-                    stdout.flush()?;
+                    _ => {
+                        // Ignore other events
+                    }
                 }
+                stdout.flush()?;
             }
         }
     }
