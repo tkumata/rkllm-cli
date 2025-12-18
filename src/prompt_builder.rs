@@ -151,6 +151,7 @@ pub fn build_chat_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::intent::has_file_operation_intent;
 
     #[test]
     fn test_has_file_operation_intent_japanese() {
