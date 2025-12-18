@@ -34,6 +34,14 @@ You can create multiple files in a single response.
 Preferred format is <file path="..."> ... </file>. Bracket format [CREATE_FILE: ...] ... [END_FILE] is allowed for compatibility only.
 "#;
 
+/// tool-only モード時の指示
+const TOOL_ONLY_INSTRUCTIONS: &str = r#"
+## Tool-only Mode
+
+Local file creation or modification is disabled in this session.
+Do not emit <file>...</file> or [CREATE_FILE: ...] blocks. Provide the result directly, and use MCP tools for environment actions instead of local writes.
+"#;
+
 /// ユーザー入力にファイル操作の意図が含まれているかを判定
 ///
 /// # 引数
@@ -99,6 +107,7 @@ pub fn build_prompt(user_input: &str, files: &[FileContent], errors: &[(String, 
         None,
         &[],
         has_file_operation_intent(user_input),
+        true,
     )
 }
 
@@ -117,6 +126,7 @@ pub fn build_simple_prompt(user_input: &str) -> String {
         None,
         &[],
         has_file_operation_intent(user_input),
+        true,
     )
 }
 
@@ -133,6 +143,7 @@ pub fn build_chat_prompt(
     tool_info: Option<&str>,
     output_targets: &[String],
     has_file_op_intent: bool,
+    file_writes_enabled: bool,
 ) -> String {
     let mut prompt = String::new();
 
@@ -140,7 +151,10 @@ pub fn build_chat_prompt(
     prompt.push_str("<system>\n");
     prompt.push_str(SYSTEM_INSTRUCTIONS);
     prompt.push_str("\n");
-    if has_file_op_intent {
+    if !file_writes_enabled {
+        prompt.push_str(TOOL_ONLY_INSTRUCTIONS);
+        prompt.push_str("\n");
+    } else if has_file_op_intent {
         prompt.push_str(FILE_OPERATION_INSTRUCTIONS);
         prompt.push_str("\n");
     }
@@ -176,7 +190,7 @@ pub fn build_chat_prompt(
         prompt.push_str("</files>\n\n");
     }
 
-    if !output_targets.is_empty() {
+    if file_writes_enabled && !output_targets.is_empty() {
         prompt.push_str("<output_targets>\n");
         for target in output_targets {
             prompt.push_str(&format!("<target>{}</target>\n", target));
@@ -312,8 +326,26 @@ mod tests {
             None,
             &["b.txt".to_string()],
             true,
+            true,
         );
         assert!(prompt.contains("<output_targets>"));
         assert!(prompt.contains("<target>b.txt</target>"));
+    }
+
+    #[test]
+    fn test_tool_only_instructions_and_no_output_targets() {
+        let prompt = build_chat_prompt(
+            "test.txtを作成して",
+            &[],
+            &[],
+            None,
+            &["test.txt".to_string()],
+            true,
+            false,
+        );
+
+        assert!(prompt.contains("Tool-only Mode"));
+        assert!(!prompt.contains("<output_targets>"));
+        assert!(!prompt.contains("File Operation Instructions"));
     }
 }

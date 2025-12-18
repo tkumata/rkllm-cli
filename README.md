@@ -26,6 +26,7 @@ The Rock5B's NPU delivers only 6 TOPS, so please don't expect too much.
 - **File in/out pipeline**: Read specified files → transform (translate/summarize/append) → write to specified output paths. Source files are not overwritten unless explicitly instructed.
 - **Writing files**: Write local files via `<file path="..."> ... </file>` format (bracket format is also accepted)
 - **Prompt preview & write confirmation**: `--preview-prompt` (or `RKLLM_DEBUG_PROMPT=1`) to print the composed prompt, `--confirm-writes` to ask before every write.
+- **Tool-only mode**: `--tool-only` uses MCP tools only (requires `--mcp-config`); local writes are disabled and file outputs are sent to the MCP write tool when available.
 - **MCP client**: Connect to MCP server; tool list (short form) is always included in the system prompt with per-tool JSON samples for `[TOOL_CALL]` usage.
 
 ## Prerequisites
@@ -92,6 +93,7 @@ The binary will be located at:
 --mcp-config mcp_config.toml    # enable MCP tools
 --preview-prompt                # print the composed prompt before sending
 --confirm-writes                # ask before every file write
+--tool-only                     # MCP tools only; disable local file writes and forward outputs to MCP (requires --mcp-config)
 ```
 
 #### MCP tools and samples

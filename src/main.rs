@@ -40,6 +40,10 @@ enum Commands {
         /// Ask confirmation before every file write
         #[arg(long)]
         confirm_writes: bool,
+
+        /// Disable local file writes and ignore file output markers (MCP tools only)
+        #[arg(long)]
+        tool_only: bool,
     },
 }
 
@@ -53,6 +57,7 @@ async fn main() -> Result<()> {
             mcp_config,
             preview_prompt,
             confirm_writes,
+            tool_only,
         } => {
             if !model.exists() {
                 eprintln!("Error: Model file not found: {}", model.display());
@@ -72,6 +77,7 @@ async fn main() -> Result<()> {
                 mcp_config,
                 preview_prompt,
                 confirm_writes,
+                tool_only,
             )
             .await?;
 
