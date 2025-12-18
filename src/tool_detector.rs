@@ -9,6 +9,7 @@ use crate::mcp::types::ToolCall;
 pub struct ToolCallDetector {
     json_pattern: Regex,
     xml_pattern: Regex,
+    xml_arg_pattern: Regex,
 }
 
 impl ToolCallDetector {
@@ -22,6 +23,9 @@ impl ToolCallDetector {
             // XML style: <tool_call name="...">...</tool_call>
             xml_pattern: Regex::new(
                 r#"<tool_call\s+name="([^"]+)"\s*>([\s\S]*?)</tool_call>"#
+            ).unwrap(),
+            xml_arg_pattern: Regex::new(
+                r#"<argument\s+name="([^"]+)"\s*>([^<]*)</argument>"#
             ).unwrap(),
         }
     }
@@ -72,10 +76,8 @@ impl ToolCallDetector {
 
             // Simple XML argument parsing
             let mut args = serde_json::Map::new();
-            let arg_regex =
-                Regex::new(r#"<argument\s+name="([^"]+)"\s*>([^<]*)</argument>"#).unwrap();
 
-            for arg_cap in arg_regex.captures_iter(args_str) {
+            for arg_cap in self.xml_arg_pattern.captures_iter(args_str) {
                 let arg_name = arg_cap[1].to_string();
                 let arg_value = arg_cap[2].to_string();
 

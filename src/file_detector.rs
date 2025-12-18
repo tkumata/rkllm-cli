@@ -46,6 +46,7 @@ pub fn default_extensions() -> Vec<String> {
 /// let paths = detect_file_paths("src/main.rsを読んでコメントを追加して");
 /// assert_eq!(paths, vec!["src/main.rs"]);
 /// ```
+#[cfg(test)]
 pub fn detect_file_paths(input: &str) -> Vec<String> {
     let defaults = default_extensions();
     detect_file_paths_with_exts(input, &defaults)

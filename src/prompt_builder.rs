@@ -42,64 +42,10 @@ Local file creation or modification is disabled in this session.
 Do not emit <file>...</file> or [CREATE_FILE: ...] blocks. Provide the result directly, and use MCP tools for environment actions instead of local writes.
 "#;
 
-/// ユーザー入力にファイル操作の意図が含まれているかを判定
-///
-/// # 引数
-/// * `input` - ユーザーの入力テキスト
-///
-/// # 戻り値
-/// ファイル操作の意図が含まれている場合はtrue
-pub fn has_file_operation_intent(input: &str) -> bool {
-    let input_lower = input.to_lowercase();
-
-    // ファイル作成・書き込みを示す強いキーワード（これらは単独で判定）
-    let strong_keywords = [
-        // 日本語
-        "作成", "作って", "作る", "つくって", "つくる",
-        "書き込", "書いて", "書く", "かいて",
-        "保存", "ほぞん",
-        "生成", "せいせい",
-        "出力し", "出力ファイル",
-        // 英語
-        "create", "write", "save", "generate",
-        "make a file", "make file",
-    ];
-
-    // ファイル操作のフレーズ（組み合わせ）
-    let file_operation_phrases = [
-        "ファイルに", "ファイルを作", "ファイルを書", "ファイルを生成", "ファイルを出力",
-        "file to", "file and", "to file", "in file", "into file",
-        "create file", "write file", "save file", "output file", "generate file",
-    ];
-
-    // 強いキーワードまたはファイル操作のフレーズが含まれているかチェック
-    strong_keywords.iter().any(|&keyword| input_lower.contains(keyword))
-        || file_operation_phrases.iter().any(|&phrase| input_lower.contains(phrase))
-}
-
-/// ファイル内容を含むプロンプトを構築する
-///
-/// # 引数
-/// * `user_input` - ユーザーの入力
-/// * `files` - 読み込まれたファイルの内容
-/// * `errors` - ファイル読み込みエラーのリスト
-///
-/// # 戻り値
-/// 構築されたプロンプト
-///
-/// # フォーマット
-/// ```text
-/// <files>
-/// <file path="src/main.rs">
-/// ファイルの内容...
-/// </file>
-/// </files>
-///
-/// <user_input>
-/// ユーザーの入力
-/// </user_input>
-/// ```
+#[cfg(test)]
+/// ファイル内容を含むプロンプトを構築する（テスト用）
 pub fn build_prompt(user_input: &str, files: &[FileContent], errors: &[(String, String)]) -> String {
+    use crate::intent::has_file_operation_intent;
     build_chat_prompt(
         user_input,
         files,
@@ -111,14 +57,10 @@ pub fn build_prompt(user_input: &str, files: &[FileContent], errors: &[(String, 
     )
 }
 
-/// シンプルなプロンプトを構築（ファイルなし）
-///
-/// # 引数
-/// * `user_input` - ユーザーの入力
-///
-/// # 戻り値
-/// ユーザー入力を含むプロンプト（ファイル操作の意図がある場合のみインストラクション付き）
+#[cfg(test)]
+/// シンプルなプロンプトを構築（テスト用、ファイルなし）
 pub fn build_simple_prompt(user_input: &str) -> String {
+    use crate::intent::has_file_operation_intent;
     build_chat_prompt(
         user_input,
         &[],

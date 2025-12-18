@@ -2,13 +2,41 @@ use crate::ffi::*;
 use anyhow::{anyhow, Context, Result};
 use libc::{c_int, c_void};
 use std::ffi::{CStr, CString};
+use std::time::Duration;
 use std::ptr;
 use std::sync::{Arc, Mutex};
+use std::env;
 
 // Gemma chat template
 const GEMMA_TEMPLATE: &str = "<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n";
 // Qwen chat template
-// const GEMMA_TEMPLATE: &str = "<|im_start|>system\nあなたは真面目だけど少しお茶目で優秀なAIです。正確な情報を提供します。必ず日本語で答えてください。<|im_end|><|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n";
+const QWEN_TEMPLATE: &str = "<|im_start|>system\nあなたは真面目だけど少しお茶目で優秀なAIです。正確な情報を提供します。必ず日本語で答えてください。<|im_end|><|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n";
+
+#[derive(Clone, Copy, Debug)]
+pub enum ChatTemplate {
+    Gemma,
+    Qwen,
+}
+
+impl ChatTemplate {
+    pub fn from_env() -> Self {
+        match env::var("RKLLM_TEMPLATE")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "qwen" => ChatTemplate::Qwen,
+            _ => ChatTemplate::Gemma,
+        }
+    }
+
+    fn apply(&self, prompt: &str) -> String {
+        match self {
+            ChatTemplate::Gemma => GEMMA_TEMPLATE.replace("{prompt}", prompt),
+            ChatTemplate::Qwen => QWEN_TEMPLATE.replace("{prompt}", prompt),
+        }
+    }
+}
 
 pub struct RKLLMConfig {
     pub model_path: String,
@@ -24,6 +52,8 @@ pub struct RKLLMConfig {
     pub mirostat_tau: f32,
     pub mirostat_eta: f32,
     pub skip_special_token: bool,
+    pub template: ChatTemplate,
+    pub infer_timeout: Duration,
 }
 
 impl Default for RKLLMConfig {
@@ -42,6 +72,8 @@ impl Default for RKLLMConfig {
             mirostat_tau: 5.0,
             mirostat_eta: 0.1,
             skip_special_token: true,
+            template: ChatTemplate::from_env(),
+            infer_timeout: infer_timeout_from_env(),
         }
     }
 }
@@ -68,6 +100,8 @@ pub struct RKLLM {
     _img_start: CString,
     _img_end: CString,
     _img_content: CString,
+    template: ChatTemplate,
+    infer_timeout: Duration,
 }
 
 impl RKLLM {
@@ -115,6 +149,8 @@ impl RKLLM {
             _img_start: img_start,
             _img_end: img_end,
             _img_content: img_content,
+            template: config.template,
+            infer_timeout: config.infer_timeout,
         })
     }
 
@@ -122,8 +158,8 @@ impl RKLLM {
     where
         F: FnMut(&str),
     {
-        // Apply Gemma chat template
-        let formatted_prompt = GEMMA_TEMPLATE.replace("{prompt}", prompt);
+        // Apply chat template
+        let formatted_prompt = self.template.apply(prompt);
         let prompt_cstring =
             CString::new(formatted_prompt).context("Failed to create CString for prompt")?;
         let role_cstring = CString::new("user").context("Failed to create CString for role")?;
@@ -156,7 +192,7 @@ impl RKLLM {
 
         // Wait for callback to finish (poll until is_finished or has_error)
         let start_time = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(120);
+        let timeout = self.infer_timeout;
         loop {
             std::thread::sleep(std::time::Duration::from_millis(10));
             // Handle poisoned mutex gracefully
@@ -197,6 +233,15 @@ impl RKLLM {
 
         Ok(output)
     }
+}
+
+fn infer_timeout_from_env() -> Duration {
+    let secs = env::var("RKLLM_INFER_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(120);
+    Duration::from_secs(secs)
 }
 
 impl Drop for RKLLM {
@@ -261,6 +306,7 @@ unsafe fn callback_impl(
                 return 0;
             }
 
+            // logits/perf are provided by RKLLMResult but CLI ではストリーミングテキストのみを利用する。
             // text is a null-terminated C string, use CStr to read it
             match CStr::from_ptr(result_ref.text).to_str() {
                 Ok(text) => {

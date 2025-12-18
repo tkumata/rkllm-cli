@@ -302,7 +302,8 @@ impl StdioTransport {
         Ok(())
     }
 
-    /// Check if the server process is still running
+    /// Check if the server process is still running (tests only)
+    #[cfg(test)]
     pub async fn is_alive(&self) -> bool {
         let mut child = self.child.lock().await;
         child.try_wait().ok().flatten().is_none()

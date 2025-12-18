@@ -1,10 +1,12 @@
 use anyhow::{anyhow, Context, Result};
+use once_cell::sync::OnceCell;
 use path_absolutize::*;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// ファイル読み込みの最大サイズ（1MB）
-const MAX_FILE_SIZE: u64 = 1_048_576;
+/// ファイル読み込みの最大サイズ（デフォルト: 1MB）。環境変数 `RKLLM_MAX_FILE_SIZE` で上書き可能。
+static MAX_FILE_SIZE: OnceCell<u64> = OnceCell::new();
 
 /// ファイル読み込みの結果
 #[derive(Debug, Clone)]
@@ -114,10 +116,11 @@ pub fn read_file(path: &str) -> Result<FileContent> {
     let metadata = fs::metadata(&resolved_path)
         .with_context(|| format!("Failed to read file metadata: {}", path))?;
 
-    if metadata.len() > MAX_FILE_SIZE {
+    let max_size = max_file_size();
+    if metadata.len() > max_size {
         return Err(anyhow!(
             "File is too large (max {} bytes): {} bytes",
-            MAX_FILE_SIZE,
+            max_size,
             metadata.len()
         ));
     }
@@ -132,25 +135,14 @@ pub fn read_file(path: &str) -> Result<FileContent> {
     })
 }
 
-/// 複数のファイルを読み込む
-///
-/// # 引数
-/// * `paths` - ファイルパスのリスト
-///
-/// # 戻り値
-/// 成功したファイルの内容と、失敗したファイルのエラーメッセージのタプル
-pub fn read_files(paths: &[String]) -> (Vec<FileContent>, Vec<(String, String)>) {
-    let mut successes = Vec::new();
-    let mut errors = Vec::new();
-
-    for path in paths {
-        match read_file(path) {
-            Ok(content) => successes.push(content),
-            Err(e) => errors.push((path.clone(), e.to_string())),
-        }
-    }
-
-    (successes, errors)
+fn max_file_size() -> u64 {
+    *MAX_FILE_SIZE.get_or_init(|| {
+        env::var("RKLLM_MAX_FILE_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(1_048_576)
+    })
 }
 
 /// ファイルパスが安全かどうかをチェックする

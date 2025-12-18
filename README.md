@@ -28,6 +28,7 @@ The Rock5B's NPU delivers only 6 TOPS, so please don't expect too much.
 - **Prompt preview & write confirmation**: `--preview-prompt` (or `RKLLM_DEBUG_PROMPT=1`) to print the composed prompt, `--confirm-writes` to ask before every write.
 - **Tool-only mode**: `--tool-only` uses MCP tools only (requires `--mcp-config`); local writes are disabled and file outputs are sent to the MCP write tool when available.
 - **MCP client**: Connect to MCP server; tool list (short form) is always included in the system prompt with per-tool JSON samples for `[TOOL_CALL]` usage.
+- **Chat templates & timeouts**: Switch template via `RKLLM_TEMPLATE=qwen|gemma`; adjust generation timeout via `RKLLM_INFER_TIMEOUT_SECS` and file load size via `RKLLM_MAX_FILE_SIZE`.
 
 ## Prerequisites
 
@@ -92,7 +93,7 @@ The binary will be located at:
 # Common flags
 --mcp-config mcp_config.toml    # enable MCP tools
 --preview-prompt                # print the composed prompt before sending
---confirm-writes                # ask before every file write
+--confirm-writes[=true|false]   # ask before every file write (default: true)
 --tool-only                     # MCP tools only; disable local file writes and forward outputs to MCP (requires --mcp-config)
 ```
 

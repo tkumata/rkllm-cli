@@ -1,4 +1,4 @@
-use crate::file_detector::{default_extensions, DEFAULT_EXTENSIONS};
+use crate::file_detector::default_extensions;
 use directories::ProjectDirs;
 use serde::Deserialize;
 use std::fs;
@@ -111,6 +111,7 @@ fn normalize_exts(exts: Option<Vec<String>>) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_detector::DEFAULT_EXTENSIONS;
 
     #[test]
     fn default_contains_defaults() {

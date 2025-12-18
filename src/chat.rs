@@ -5,7 +5,8 @@ use crate::file_output_parser;
 use crate::llm::{RKLLMConfig, RKLLM};
 use crate::mcp::{McpClient, McpConfig};
 use crate::mcp::types::Tool;
-use crate::prompt_builder::{build_chat_prompt, has_file_operation_intent};
+use crate::intent::{has_file_operation_intent, prefers_output_only};
+use crate::prompt_builder::build_chat_prompt;
 use crate::tool_detector::ToolCallDetector;
 use anyhow::{Context, Result};
 use crossterm::{
@@ -176,7 +177,7 @@ impl ChatSession {
                     for p in iter {
                         output_candidates.push(p.clone());
                     }
-                } else if has_file_op_intent && likely_output_only(&trimmed) {
+                } else if has_file_op_intent && prefers_output_only(&trimmed) {
                     output_candidates.extend(file_paths.clone());
                 } else {
                     input_candidates.extend(file_paths.clone());
@@ -897,15 +898,6 @@ fn render_input(
     execute!(stdout, cursor::MoveToColumn(col as u16))?;
     stdout.flush()?;
     Ok(rows_used)
-}
-
-/// 出力専用と推定できるキーワードを含むか判定
-fn likely_output_only(input: &str) -> bool {
-    let lower = input.to_lowercase();
-    let hints = [
-        "保存", "書き", "出力", "生成", "作成", "save", "write", "output", "generate", "create",
-    ];
-    hints.iter().any(|kw| lower.contains(kw))
 }
 
 /// 改行差分や末尾空白を無視して内容一致を判定
