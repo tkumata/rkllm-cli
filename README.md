@@ -8,7 +8,14 @@ This project provides a command-line interface to interact with Large Language M
 
 I couldn't understand why Rockchip's samples use the adb command. That's why I created this program. I want to use the NPU on rock5B.
 
-Please use the Qwen3 1.7B model.
+| Model      | tps  | Notes                             |
+| ---------- | ---- | --------------------------------- |
+| Qwen3 1.7B | 11.9 | Fast but accuracy is poor         |
+| Qwen3 4B   | 2.9  | Too slow                          |
+| Gemma3 1B  | 12   | Fast but MCP client does not work |
+| Gemma3 4B  | 2.9  | Too slow                          |
+
+The Rock5B's NPU delivers only 6 TOPS, so please don't expect too much.
 
 ## Features
 
@@ -17,9 +24,9 @@ Please use the Qwen3 1.7B model.
 - **UTF-8 Handling**: Proper handling of incomplete multi-byte UTF-8 sequences during streaming
 - **Error Handling**: Comprehensive error handling with `anyhow`
 - **File in/out pipeline**: Read specified files → transform (translate/summarize/append) → write to specified output paths. Source files are not overwritten unless explicitly instructed.
-- **Writing files**: ✨ Write local files via `<file path="..."> ... </file>` format (bracket format is also accepted)
+- **Writing files**: Write local files via `<file path="..."> ... </file>` format (bracket format is also accepted)
 - **Prompt preview & write confirmation**: `--preview-prompt` (or `RKLLM_DEBUG_PROMPT=1`) to print the composed prompt, `--confirm-writes` to ask before every write.
-- **MCP client**: Connect to MCP server; tool list is shown in short form by default (set `RKLLM_HIDE_TOOL_LIST=1` to hide, `RKLLM_SHOW_TOOL_LIST_FULL=1` for full details).
+- **MCP client**: Connect to MCP server; tool list (short form) is always included in the system prompt with per-tool JSON samples for `[TOOL_CALL]` usage.
 
 ## Prerequisites
 
@@ -86,6 +93,21 @@ The binary will be located at:
 --preview-prompt                # print the composed prompt before sending
 --confirm-writes                # ask before every file write
 ```
+
+#### MCP tools and samples
+
+- If `--mcp-config` connects successfully, the system prompt automatically lists available tools (short form) and adds a `[TOOL_CALL]` sample per tool, e.g.:
+  ```
+  [TOOL_CALL]
+  {
+    "name": "list_directory",
+    "arguments": {
+      "path": "/tmp"
+    }
+  }
+  [END_TOOL_CALL]
+  ```
+- Use `RKLLM_DEBUG_PROMPT=1` with `--preview-prompt` to inspect the exact `<tools>` section if needed.
 
 ### Example
 
@@ -169,11 +191,6 @@ If you get an error about `librkllmrt.so` not being found:
 - Ensure the model is in RKLLM format (`.rkllm`)
 - Check that you have sufficient memory on the device
 
-## Future Enhancements
-
-- **Phase 2**: File upload and context management (Claude CLI-style)
-- **Phase 3**: MCP (Model Context Protocol) client support
-
 ## License
 
 This project is provided as-is for use with Rockchip NPU hardware.
@@ -181,4 +198,3 @@ This project is provided as-is for use with Rockchip NPU hardware.
 ## Reference
 
 - Python implementation: `sample/gradio_server.py`
-- Requirements document: `docs/RKLLM_RUST_CLI_REQUIREMENTS.md`
