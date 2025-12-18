@@ -113,3 +113,4 @@ nvm install node
 - [Model Context Protocol 公式サイト](https://modelcontextprotocol.io/)
 - [MCP Specification](https://modelcontextprotocol.io/specification/2025-11-25)
 - [公式 MCP サーバ一覧](https://github.com/modelcontextprotocol)
+- [tool-only モード運用ガイド](./tool_only_guide.md)

@@ -12,8 +12,7 @@ use super::types::*;
 pub struct ServerConnection {
     pub name: String,
     transport: StdioTransport,
-    #[allow(dead_code)]
-    server_info: Implementation,
+    _server_info: Implementation,
     capabilities: ServerCapabilities,
     available_tools: Vec<Tool>,
 }
@@ -77,7 +76,7 @@ impl ServerConnection {
         let mut connection = Self {
             name: config.name.clone(),
             transport,
-            server_info: init_result.server_info,
+            _server_info: init_result.server_info,
             capabilities: init_result.capabilities,
             available_tools: Vec::new(),
         };
@@ -169,24 +168,6 @@ impl ServerConnection {
     pub fn tools(&self) -> &[Tool] {
         &self.available_tools
     }
-
-    /// Get server info
-    #[allow(dead_code)]
-    pub fn server_info(&self) -> &Implementation {
-        &self.server_info
-    }
-
-    /// Get server capabilities
-    #[allow(dead_code)]
-    pub fn capabilities(&self) -> &ServerCapabilities {
-        &self.capabilities
-    }
-
-    /// Check if server is still alive
-    #[allow(dead_code)]
-    pub async fn is_alive(&self) -> bool {
-        self.transport.is_alive().await
-    }
 }
 
 /// MCP Client managing multiple server connections
@@ -238,11 +219,6 @@ impl McpClient {
             .collect()
     }
 
-    /// Check if any connected server exposes a given tool
-    pub fn has_tool(&self, tool_name: &str) -> bool {
-        self.find_server_for_tool(tool_name).is_some()
-    }
-
     /// Find which server provides a tool with the given name
     fn find_server_for_tool(&self, tool_name: &str) -> Option<&ServerConnection> {
         for connection in self.servers.values() {
@@ -285,34 +261,6 @@ impl McpClient {
         Ok(tool_result)
     }
 
-    /// Check if client has any servers connected
-    #[allow(dead_code)]
-    pub fn has_servers(&self) -> bool {
-        !self.servers.is_empty()
-    }
-
-    /// Get number of connected servers
-    #[allow(dead_code)]
-    pub fn server_count(&self) -> usize {
-        self.servers.len()
-    }
-
-    /// Get a specific server by name
-    #[allow(dead_code)]
-    pub fn get_server(&self, name: &str) -> Option<&ServerConnection> {
-        self.servers.get(name)
-    }
-
-    /// Check if all servers are still alive
-    #[allow(dead_code)]
-    pub async fn all_alive(&self) -> bool {
-        for connection in self.servers.values() {
-            if !connection.is_alive().await {
-                return false;
-            }
-        }
-        true
-    }
 }
 
 #[cfg(test)]

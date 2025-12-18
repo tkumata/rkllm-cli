@@ -4,13 +4,14 @@ mod ffi;
 mod file_detector;
 mod file_ops;
 mod file_output_parser;
+mod intent;
 mod llm;
 mod mcp;
 mod prompt_builder;
 mod tool_detector;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -38,8 +39,12 @@ enum Commands {
         preview_prompt: bool,
 
         /// Ask confirmation before every file write
-        #[arg(long)]
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
         confirm_writes: bool,
+
+        /// Disable local file writes and ignore file output markers (MCP tools only)
+        #[arg(long)]
+        tool_only: bool,
     },
 }
 
@@ -53,6 +58,7 @@ async fn main() -> Result<()> {
             mcp_config,
             preview_prompt,
             confirm_writes,
+            tool_only,
         } => {
             if !model.exists() {
                 eprintln!("Error: Model file not found: {}", model.display());
@@ -72,6 +78,7 @@ async fn main() -> Result<()> {
                 mcp_config,
                 preview_prompt,
                 confirm_writes,
+                tool_only,
             )
             .await?;
 

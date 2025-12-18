@@ -555,6 +555,7 @@ dependencies = [
  "directories",
  "libc",
  "mime_guess",
+ "once_cell",
  "path-absolutize",
  "regex",
  "serde",

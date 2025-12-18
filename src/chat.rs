@@ -5,7 +5,8 @@ use crate::file_output_parser;
 use crate::llm::{RKLLMConfig, RKLLM};
 use crate::mcp::{McpClient, McpConfig};
 use crate::mcp::types::Tool;
-use crate::prompt_builder::{build_chat_prompt, has_file_operation_intent};
+use crate::intent::{has_file_operation_intent, prefers_output_only};
+use crate::prompt_builder::build_chat_prompt;
 use crate::tool_detector::ToolCallDetector;
 use anyhow::{Context, Result};
 use crossterm::{
@@ -31,6 +32,7 @@ pub struct ChatSession {
     last_ctrl_c: Arc<Mutex<Option<Instant>>>,
     preview_prompt: bool,
     confirm_writes: bool,
+    tool_only: bool,
     config: AppConfig,
 }
 
@@ -40,6 +42,7 @@ impl ChatSession {
         mcp_config_path: Option<PathBuf>,
         preview_prompt: bool,
         confirm_writes: bool,
+        tool_only: bool,
     ) -> Result<Self> {
         let config = RKLLMConfig {
             model_path,
@@ -80,15 +83,22 @@ impl ChatSession {
             None
         };
 
-        Ok(Self {
+        let session = Self {
             rkllm,
             mcp_client,
             tool_detector: ToolCallDetector::new(),
             last_ctrl_c: Arc::new(Mutex::new(None)),
             preview_prompt,
             confirm_writes,
+            tool_only,
             config: AppConfig::load(),
-        })
+        };
+
+        if session.tool_only && session.mcp_client.is_none() {
+            anyhow::bail!("--tool-only requires MCP tools. Please provide a valid --mcp-config.");
+        }
+
+        Ok(session)
     }
 
     pub async fn start(&self) -> Result<()> {
@@ -133,6 +143,10 @@ impl ChatSession {
             }
 
             let has_file_op_intent = has_file_operation_intent(&trimmed);
+            if self.tool_only && has_file_op_intent {
+                println!("\n[tool-only] Local file writes are disabled. Use MCP tools for any file outputs.");
+            }
+
             let file_paths = if has_file_op_intent && !self.config.detect_extensions.is_empty() {
                 file_detector::detect_file_paths_with_exts(&trimmed, &self.config.detect_extensions)
             } else {
@@ -163,7 +177,7 @@ impl ChatSession {
                     for p in iter {
                         output_candidates.push(p.clone());
                     }
-                } else if has_file_op_intent && likely_output_only(&trimmed) {
+                } else if has_file_op_intent && prefers_output_only(&trimmed) {
                     output_candidates.extend(file_paths.clone());
                 } else {
                     input_candidates.extend(file_paths.clone());
@@ -208,6 +222,7 @@ impl ChatSession {
                 tool_info.as_deref(),
                 &output_targets,
                 has_file_op_intent,
+                !self.tool_only,
             );
             if self.preview_prompt || std::env::var("RKLLM_DEBUG_PROMPT").is_ok() {
                 eprintln!("\n[DEBUG prompt length={}]", prompt.len());
@@ -226,7 +241,11 @@ impl ChatSession {
 
                     // ファイル操作を処理（ユーザーに意図がある場合のみ）
                     if has_file_op_intent {
-                        if let Err(e) = self.process_file_operations(&response, &provided_files, &output_targets) {
+                        if self.tool_only {
+                            if let Err(e) = self.process_file_operations_via_tools(&response, &provided_files, &output_targets).await {
+                                eprintln!("\nError processing file operations via MCP tools: {}", e);
+                            }
+                        } else if let Err(e) = self.process_file_operations(&response, &provided_files, &output_targets) {
                             eprintln!("\nError processing file operations: {}", e);
                         }
                     }
@@ -575,6 +594,98 @@ impl ChatSession {
         Ok(input.trim().eq_ignore_ascii_case("y"))
     }
 
+    /// tool-only モード時にファイル操作を MCP ツールに委譲する
+    async fn process_file_operations_via_tools(
+        &self,
+        output: &str,
+        provided_files: &std::collections::HashMap<String, String>,
+        output_targets: &[String],
+    ) -> Result<()> {
+        let Some(mcp_client) = &self.mcp_client else {
+            eprintln!("[tool-only] MCP client is not available.");
+            return Ok(());
+        };
+
+        let mut operations = file_output_parser::parse_file_operations(output);
+        if operations.is_empty() {
+            return Ok(());
+        }
+
+        println!("\n[Detected {} file operation(s) (tool-only)]", operations.len());
+
+        // 入力と同一内容はスキップ
+        operations = operations
+            .into_iter()
+            .filter(|op| {
+                if let Some((input_path, _)) =
+                    provided_files
+                        .iter()
+                        .find(|(_, content)| contents_equal(content, &op.content))
+                {
+                    println!(
+                        "[Skipped unchanged (matches input {}): {}]",
+                        input_path, op.path
+                    );
+                    return false;
+                }
+                true
+            })
+            .collect();
+
+        if operations.is_empty() {
+            println!("[No file operations after filtering unchanged content]");
+            return Ok(());
+        }
+
+        // もし出力パスが未指定で、かつ出力ターゲットが1つだけならリマップ
+        if !output_targets.is_empty() && output_targets.len() == 1 {
+            let target = &output_targets[0];
+            let all_input_paths: bool = operations
+                .iter()
+                .all(|op| provided_files.contains_key(&op.path));
+            if all_input_paths {
+                for op in operations.iter_mut() {
+                    println!("[Remap {} -> {}]", op.path, target);
+                    op.path = target.clone();
+                }
+            }
+        }
+
+        let tools = mcp_client.list_all_tools();
+        let Some(write_tool_name) = Self::select_write_tool_name(&tools) else {
+            eprintln!("[tool-only] No suitable MCP write tool found. Skipping file outputs.");
+            return Ok(());
+        };
+
+        for op in operations {
+            let args = json!({
+                "path": op.path,
+                "content": op.content,
+            });
+
+            match mcp_client.call_tool(&write_tool_name, args).await {
+                Ok(result) => {
+                    if result.success {
+                        println!("[tool-only] Wrote via tool '{}': {}", write_tool_name, op.path);
+                    } else {
+                        eprintln!(
+                            "[tool-only] Tool '{}' failed for {}: {}",
+                            write_tool_name, op.path, result.output
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[tool-only] Failed to call tool '{}' for {}: {}",
+                        write_tool_name, op.path, e
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// LLMの応答からファイル操作を処理する
     ///
     /// # 引数
@@ -700,6 +811,37 @@ impl ChatSession {
         Ok(())
     }
 
+    /// MCPツールから書き込み用ツール名を推定する
+    fn select_write_tool_name(tools: &[(&str, &Tool)]) -> Option<String> {
+        let mut best: Option<(u8, String)> = None;
+
+        for (_server, tool) in tools {
+            let name_lower = tool.name.to_lowercase();
+            let rank = if name_lower == "write_file" || name_lower == "writefile" {
+                Some(0)
+            } else if name_lower.contains("write") && name_lower.contains("file") {
+                Some(1)
+            } else if let Some(props) = &tool.input_schema.properties {
+                if props.contains_key("path") && props.contains_key("content") {
+                    Some(2)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(r) = rank {
+                let should_replace = best.as_ref().map(|(current, _)| r < *current).unwrap_or(true);
+                if should_replace {
+                    best = Some((r, tool.name.clone()));
+                }
+            }
+        }
+
+        best.map(|(_, name)| name)
+    }
+
 }
 
 fn pop_last_grapheme_width(buffer: &mut String) -> Option<usize> {
@@ -756,15 +898,6 @@ fn render_input(
     execute!(stdout, cursor::MoveToColumn(col as u16))?;
     stdout.flush()?;
     Ok(rows_used)
-}
-
-/// 出力専用と推定できるキーワードを含むか判定
-fn likely_output_only(input: &str) -> bool {
-    let lower = input.to_lowercase();
-    let hints = [
-        "保存", "書き", "出力", "生成", "作成", "save", "write", "output", "generate", "create",
-    ];
-    hints.iter().any(|kw| lower.contains(kw))
 }
 
 /// 改行差分や末尾空白を無視して内容一致を判定
@@ -870,5 +1003,70 @@ mod tests {
         assert!(block.contains("\"name\": \"echo\""));
         assert!(block.contains("\"arguments\""));
         assert!(block.contains("[END_TOOL_CALL]"));
+    }
+
+    #[test]
+    fn select_write_tool_prefers_exact_match() {
+        let mut props = HashMap::new();
+        props.insert("path".to_string(), json!({"type": "string"}));
+        props.insert("content".to_string(), json!({"type": "string"}));
+
+        let tools = vec![
+            ("fs", Tool {
+                name: "save_file".to_string(),
+                description: None,
+                input_schema: ToolInputSchema {
+                    schema_type: "object".to_string(),
+                    properties: Some(props.clone()),
+                    required: None,
+                    additional_properties: None,
+                },
+            }),
+            ("fs", Tool {
+                name: "write_file".to_string(),
+                description: None,
+                input_schema: ToolInputSchema {
+                    schema_type: "object".to_string(),
+                    properties: Some(props.clone()),
+                    required: None,
+                    additional_properties: None,
+                },
+            }),
+        ];
+
+        let wrapped: Vec<(&str, &Tool)> = tools
+            .iter()
+            .map(|(server, tool)| (*server, tool))
+            .collect();
+        let selected = ChatSession::select_write_tool_name(&wrapped);
+        assert_eq!(selected.as_deref(), Some("write_file"));
+    }
+
+    #[test]
+    fn select_write_tool_falls_back_on_props() {
+        let mut props = HashMap::new();
+        props.insert("path".to_string(), json!({"type": "string"}));
+        props.insert("content".to_string(), json!({"type": "string"}));
+
+        let tools = vec![(
+            "fs",
+            Tool {
+                name: "store".to_string(),
+                description: None,
+                input_schema: ToolInputSchema {
+                    schema_type: "object".to_string(),
+                    properties: Some(props),
+                    required: None,
+                    additional_properties: None,
+                },
+            },
+        )];
+
+        let wrapped: Vec<(&str, &Tool)> = tools
+            .iter()
+            .map(|(server, tool)| (*server, tool))
+            .collect();
+        let selected = ChatSession::select_write_tool_name(&wrapped);
+        assert_eq!(selected.as_deref(), Some("store"));
     }
 }
