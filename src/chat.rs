@@ -4,6 +4,7 @@ use crate::file_ops;
 use crate::file_output_parser;
 use crate::llm::{RKLLMConfig, RKLLM};
 use crate::mcp::{McpClient, McpConfig};
+use crate::mcp::types::Tool;
 use crate::prompt_builder::{build_chat_prompt, has_file_operation_intent};
 use crate::tool_detector::ToolCallDetector;
 use anyhow::{Context, Result};
@@ -14,6 +15,8 @@ use crossterm::{
     style::{Color, Print, SetForegroundColor, ResetColor},
     terminal::{self},
 };
+use serde_json::{self, json};
+use std::collections::HashSet;
 use std::io::{self, stdout, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -418,15 +421,81 @@ impl ChatSession {
         print!("{}", ResetColor);
     }
 
-    fn build_tool_info(&self) -> Option<String> {
-        // デフォルトは短縮版を表示。環境変数で抑止/詳細化。
-        let hide = std::env::var("RKLLM_HIDE_TOOL_LIST").is_ok();
-        let show_full = std::env::var("RKLLM_SHOW_TOOL_LIST_FULL").is_ok();
-        let show_short = std::env::var("RKLLM_SHOW_TOOL_LIST").is_ok() || (!hide && !show_full);
-        if hide || (!show_short && !show_full) {
-            return None;
+    fn build_tool_sample_block(tool: &Tool) -> String {
+        let sample_args = Self::build_sample_arguments(tool);
+        let sample_call = json!({
+            "name": tool.name.clone(),
+            "arguments": sample_args,
+        });
+        let pretty = serde_json::to_string_pretty(&sample_call).unwrap_or_else(|_| "{}".to_string());
+
+        format!("[TOOL_CALL]\n{}\n[END_TOOL_CALL]\n", pretty)
+    }
+
+    fn build_sample_arguments(tool: &Tool) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        let mut added = false;
+        let required: HashSet<&str> = tool
+            .input_schema
+            .required
+            .as_ref()
+            .map(|keys| keys.iter().map(|k| k.as_str()).collect())
+            .unwrap_or_default();
+
+        if let Some(properties) = &tool.input_schema.properties {
+            let mut keys: Vec<&String> = if required.is_empty() {
+                properties.keys().collect()
+            } else {
+                properties
+                    .keys()
+                    .filter(|key| required.contains(key.as_str()))
+                    .collect()
+            };
+            keys.sort();
+
+            for key in keys {
+                if let Some(schema) = properties.get(key) {
+                    map.insert(key.clone(), Self::sample_value_for_schema(schema));
+                    added = true;
+                }
+            }
         }
 
+        if !added {
+            map.insert("example".to_string(), serde_json::Value::String("value".to_string()));
+        }
+
+        serde_json::Value::Object(map)
+    }
+
+    fn sample_value_for_schema(schema: &serde_json::Value) -> serde_json::Value {
+        if let Some(default) = schema.get("default") {
+            return default.clone();
+        }
+
+        if let Some(enum_values) = schema.get("enum").and_then(|v| v.as_array()) {
+            if let Some(first) = enum_values.first() {
+                return first.clone();
+            }
+        }
+
+        match schema.get("type").and_then(|v| v.as_str()) {
+            Some("string") => serde_json::Value::String("example".to_string()),
+            Some("integer") | Some("number") => json!(0),
+            Some("boolean") => serde_json::Value::Bool(true),
+            Some("array") => {
+                if let Some(items) = schema.get("items") {
+                    serde_json::Value::Array(vec![Self::sample_value_for_schema(items)])
+                } else {
+                    serde_json::Value::Array(vec![])
+                }
+            }
+            Some("object") => serde_json::Value::Object(serde_json::Map::new()),
+            _ => serde_json::Value::String("value".to_string()),
+        }
+    }
+
+    fn build_tool_info(&self) -> Option<String> {
         let Some(mcp_client) = &self.mcp_client else {
             return None;
         };
@@ -436,51 +505,19 @@ impl ChatSession {
         }
 
         let mut info = String::from("\n## Available Tools\n\n");
-        if show_full {
-            info.push_str("You have access to the following tools. Use them when appropriate:\n\n");
-        } else {
-            info.push_str("Available tools (short list):\n\n");
-        }
+        info.push_str("Available tools (short list):\n\n");
 
         for (_server_name, tool) in &tools {
             info.push_str(&format!("### {}\n", tool.name));
             if let Some(desc) = &tool.description {
                 info.push_str(&format!("{}\n", desc));
             }
-            if show_full {
-                info.push_str("\nArguments:\n");
-                if let Some(properties) = &tool.input_schema.properties {
-                    for (arg_name, arg_schema) in properties {
-                        let arg_type = arg_schema
-                            .get("type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("string");
-                        let arg_desc = arg_schema
-                            .get("description")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let required_mark = if tool
-                            .input_schema
-                            .required
-                            .as_ref()
-                            .map(|r| r.contains(arg_name))
-                            .unwrap_or(false)
-                        {
-                            " (required)"
-                        } else {
-                            ""
-                        };
-                        info.push_str(&format!(
-                            "- `{}` ({}){}: {}\n",
-                            arg_name, arg_type, required_mark, arg_desc
-                        ));
-                    }
-                }
-                info.push_str("\n");
-            }
+            let sample_block = ChatSession::build_tool_sample_block(tool);
+            info.push_str("\nSample:\n");
+            info.push_str(&sample_block);
         }
 
-        info.push_str("\nTo use a tool, output:\n\n");
+        info.push_str("\nTo use a tool, output (see per-tool samples above):\n\n");
         info.push_str("[TOOL_CALL]\n");
         info.push_str("{\n");
         info.push_str("  \"name\": \"tool_name\",\n");
@@ -740,7 +777,10 @@ fn contents_equal(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::pop_last_grapheme_width;
+    use super::{pop_last_grapheme_width, ChatSession};
+    use crate::mcp::types::{Tool, ToolInputSchema};
+    use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn pop_ascii_grapheme() {
@@ -768,5 +808,67 @@ mod tests {
         let mut buffer = "e\u{0301}".to_string(); // e + combining acute
         assert_eq!(pop_last_grapheme_width(&mut buffer), Some(1));
         assert_eq!(buffer, "");
+    }
+
+    #[test]
+    fn build_sample_arguments_prefers_required() {
+        let mut props = HashMap::new();
+        props.insert("path".to_string(), json!({"type": "string", "default": "/tmp"}));
+        props.insert("recursive".to_string(), json!({"type": "boolean"}));
+        let tool = Tool {
+            name: "list_directory".to_string(),
+            description: None,
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(props),
+                required: Some(vec!["path".to_string()]),
+                additional_properties: None,
+            },
+        };
+
+        let args = ChatSession::build_sample_arguments(&tool);
+        let obj = args.as_object().unwrap();
+        assert_eq!(obj.len(), 1);
+        assert_eq!(obj.get("path"), Some(&json!("/tmp")));
+    }
+
+    #[test]
+    fn build_sample_arguments_adds_placeholder_when_empty() {
+        let tool = Tool {
+            name: "ping".to_string(),
+            description: None,
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: None,
+                required: None,
+                additional_properties: None,
+            },
+        };
+
+        let args = ChatSession::build_sample_arguments(&tool);
+        let obj = args.as_object().unwrap();
+        assert_eq!(obj.get("example"), Some(&json!("value")));
+    }
+
+    #[test]
+    fn build_tool_sample_block_contains_wrappers() {
+        let mut props = HashMap::new();
+        props.insert("message".to_string(), json!({"type": "string"}));
+        let tool = Tool {
+            name: "echo".to_string(),
+            description: None,
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(props),
+                required: None,
+                additional_properties: None,
+            },
+        };
+
+        let block = ChatSession::build_tool_sample_block(&tool);
+        assert!(block.contains("[TOOL_CALL]"));
+        assert!(block.contains("\"name\": \"echo\""));
+        assert!(block.contains("\"arguments\""));
+        assert!(block.contains("[END_TOOL_CALL]"));
     }
 }
