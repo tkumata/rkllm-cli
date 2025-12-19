@@ -4,7 +4,7 @@ use libc::{c_int, c_void};
 use std::ffi::{CStr, CString};
 use std::time::Duration;
 use std::ptr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::env;
 
 // Gemma chat template
@@ -94,6 +94,20 @@ impl CallbackContext {
     }
 }
 
+struct CallbackState {
+    context: Mutex<CallbackContext>,
+    notify: Condvar,
+}
+
+impl CallbackState {
+    fn new() -> Self {
+        Self {
+            context: Mutex::new(CallbackContext::new()),
+            notify: Condvar::new(),
+        }
+    }
+}
+
 pub struct RKLLM {
     handle: RKLLMHandleT,
     _model_path: CString,
@@ -164,11 +178,9 @@ impl RKLLM {
             CString::new(formatted_prompt).context("Failed to create CString for prompt")?;
         let role_cstring = CString::new("user").context("Failed to create CString for role")?;
 
-        let context = Arc::new(Mutex::new(CallbackContext::new()));
-        let context_for_callback = Arc::clone(&context);
-
-        // Store the context pointer in a Box to keep it alive during the call
-        let context_ptr = Box::into_raw(Box::new(context_for_callback)) as *mut c_void;
+        let shared_state = Arc::new(CallbackState::new());
+        let callback_state_ptr =
+            Arc::into_raw(Arc::clone(&shared_state)) as *mut c_void;
 
         let input = RKLLMInput {
             role: role_cstring.as_ptr(),
@@ -187,31 +199,59 @@ impl RKLLM {
         };
 
         let ret = unsafe {
-            rkllm_run(self.handle, &input, &infer_param, context_ptr)
+            rkllm_run(self.handle, &input, &infer_param, callback_state_ptr)
         };
 
-        // Wait for callback to finish (poll until is_finished or has_error)
+        // Wait for callback to finish (Condvar with timeout)
         let start_time = std::time::Instant::now();
         let timeout = self.infer_timeout;
+        let mut timed_out = false;
+        let mut guard = match shared_state.context.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            // Handle poisoned mutex gracefully
-            let ctx = match context.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if ctx.is_finished || ctx.has_error {
+            if guard.is_finished || guard.has_error {
                 break;
             }
-            if start_time.elapsed() > timeout {
+            let elapsed = start_time.elapsed();
+            if elapsed >= timeout {
                 eprintln!("\n[Timeout waiting for response]");
+                timed_out = true;
                 break;
             }
+            let remaining = timeout - elapsed;
+            let wait_result = shared_state.notify.wait_timeout(guard, remaining);
+            guard = match wait_result {
+                Ok((guard, _)) => guard,
+                Err(poisoned) => poisoned.into_inner().0,
+            };
         }
 
-        // Reclaim the Box AFTER callbacks complete
-        unsafe {
-            let _context_box = Box::from_raw(context_ptr as *mut Arc<Mutex<CallbackContext>>);
+        drop(guard);
+
+        if timed_out {
+            let shared_state_for_cleanup = Arc::clone(&shared_state);
+            let callback_state_ptr = callback_state_ptr as usize;
+            std::thread::spawn(move || {
+                let mut guard = match shared_state_for_cleanup.context.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                while !guard.is_finished && !guard.has_error {
+                    guard = match shared_state_for_cleanup.notify.wait(guard) {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                }
+                unsafe {
+                    let _ = Arc::from_raw(callback_state_ptr as *const CallbackState);
+                }
+            });
+        } else {
+            unsafe {
+                let _ = Arc::from_raw(callback_state_ptr as *const CallbackState);
+            }
         }
 
         if ret != 0 {
@@ -219,7 +259,7 @@ impl RKLLM {
         }
 
         // Handle poisoned mutex gracefully
-        let ctx = match context.lock() {
+        let ctx = match shared_state.context.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -259,7 +299,7 @@ unsafe extern "C" fn callback_wrapper(
 ) -> c_int {
     // Catch any panics to prevent unwinding across FFI boundary
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        callback_impl(result, userdata, state)
+        unsafe { callback_impl(result, userdata, state) }
     })) {
         Ok(ret) => ret,
         Err(_) => -1, // Return error on panic
@@ -275,8 +315,8 @@ unsafe fn callback_impl(
         return 0;
     }
 
-    let context_arc = &*(userdata as *const Arc<Mutex<CallbackContext>>);
-    let mut context = match context_arc.lock() {
+    let shared_state = unsafe { &*(userdata as *const CallbackState) };
+    let mut context = match shared_state.context.lock() {
         Ok(ctx) => ctx,
         Err(poisoned) => {
             eprintln!("[WARNING] Mutex was poisoned, recovering...");
@@ -287,12 +327,14 @@ unsafe fn callback_impl(
     match state {
         LLMCallState::RkllmRunFinish => {
             context.is_finished = true;
+            shared_state.notify.notify_all();
             print!("\n");
             use std::io::Write;
             let _ = std::io::stdout().flush();
         }
         LLMCallState::RkllmRunError => {
             context.has_error = true;
+            shared_state.notify.notify_all();
             eprintln!("\nError occurred during inference");
         }
         LLMCallState::RkllmRunNormal => {
@@ -300,7 +342,7 @@ unsafe fn callback_impl(
                 return 0;
             }
 
-            let result_ref = &*result;
+            let result_ref = unsafe { &*result };
 
             if result_ref.text.is_null() {
                 return 0;
@@ -308,7 +350,7 @@ unsafe fn callback_impl(
 
             // logits/perf are provided by RKLLMResult but CLI ではストリーミングテキストのみを利用する。
             // text is a null-terminated C string, use CStr to read it
-            match CStr::from_ptr(result_ref.text).to_str() {
+            match unsafe { CStr::from_ptr(result_ref.text) }.to_str() {
                 Ok(text) => {
                     process_text_chunk(&mut context, text);
                 }
