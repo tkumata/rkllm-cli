@@ -259,7 +259,7 @@ unsafe extern "C" fn callback_wrapper(
 ) -> c_int {
     // Catch any panics to prevent unwinding across FFI boundary
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        callback_impl(result, userdata, state)
+        unsafe { callback_impl(result, userdata, state) }
     })) {
         Ok(ret) => ret,
         Err(_) => -1, // Return error on panic
@@ -275,7 +275,7 @@ unsafe fn callback_impl(
         return 0;
     }
 
-    let context_arc = &*(userdata as *const Arc<Mutex<CallbackContext>>);
+    let context_arc = unsafe { &*(userdata as *const Arc<Mutex<CallbackContext>>) };
     let mut context = match context_arc.lock() {
         Ok(ctx) => ctx,
         Err(poisoned) => {
@@ -300,7 +300,7 @@ unsafe fn callback_impl(
                 return 0;
             }
 
-            let result_ref = &*result;
+            let result_ref = unsafe { &*result };
 
             if result_ref.text.is_null() {
                 return 0;
@@ -308,7 +308,7 @@ unsafe fn callback_impl(
 
             // logits/perf are provided by RKLLMResult but CLI ではストリーミングテキストのみを利用する。
             // text is a null-terminated C string, use CStr to read it
-            match CStr::from_ptr(result_ref.text).to_str() {
+            match unsafe { CStr::from_ptr(result_ref.text) }.to_str() {
                 Ok(text) => {
                     process_text_chunk(&mut context, text);
                 }

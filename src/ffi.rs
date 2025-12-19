@@ -186,7 +186,7 @@ pub type RKLLMCallback = unsafe extern "C" fn(
 ) -> c_int;
 
 // External functions from librkllmrt.so
-extern "C" {
+unsafe extern "C" {
     pub fn rkllm_init(
         handle: *mut RKLLMHandleT,
         param: *const RKLLMParam,
