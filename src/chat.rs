@@ -36,6 +36,138 @@ pub struct ChatSession {
     config: AppConfig,
 }
 
+#[derive(Default)]
+struct InputBuffer {
+    graphemes: Vec<String>,
+    cursor: usize,
+    // 垂直移動時に保持したい表示上の列
+    preferred_col: Option<usize>,
+}
+
+impl InputBuffer {
+    fn to_string(&self) -> String {
+        self.graphemes.concat()
+    }
+
+    fn insert_str(&mut self, s: &str) {
+        for g in s.graphemes(true) {
+            self.graphemes.insert(self.cursor, g.to_string());
+            self.cursor += 1;
+        }
+        self.preferred_col = None;
+    }
+
+    fn backspace(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        self.cursor -= 1;
+        self.graphemes.remove(self.cursor);
+        self.preferred_col = None;
+        true
+    }
+
+    fn delete(&mut self) -> bool {
+        if self.cursor >= self.graphemes.len() {
+            return false;
+        }
+        self.graphemes.remove(self.cursor);
+        self.preferred_col = None;
+        true
+    }
+
+    fn move_left(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        self.cursor -= 1;
+        self.preferred_col = None;
+        true
+    }
+
+    fn move_right(&mut self) -> bool {
+        if self.cursor >= self.graphemes.len() {
+            return false;
+        }
+        self.cursor += 1;
+        self.preferred_col = None;
+        true
+    }
+
+    fn layout_positions(
+        &self,
+        prompt_width: usize,
+        indent_width: usize,
+        term_width: usize,
+    ) -> Vec<(usize, usize)> {
+        let mut positions = Vec::with_capacity(self.graphemes.len() + 1);
+        let mut row = 0usize;
+        let mut col = prompt_width;
+        positions.push((row, col));
+
+        for g in &self.graphemes {
+            if g == "\n" {
+                row += 1;
+                col = indent_width;
+                positions.push((row, col));
+                continue;
+            }
+
+            let w = UnicodeWidthStr::width(g.as_str()).max(1);
+            if col + w > term_width {
+                row += 1;
+                col = indent_width;
+            }
+            col += w;
+            positions.push((row, col));
+        }
+
+        positions
+    }
+
+    fn move_vertical(
+        &mut self,
+        delta_row: isize,
+        prompt_width: usize,
+        indent_width: usize,
+        term_width: usize,
+    ) -> bool {
+        let positions = self.layout_positions(prompt_width, indent_width, term_width);
+        let (current_row, current_col) = positions
+            .get(self.cursor)
+            .copied()
+            .unwrap_or((0, prompt_width));
+        let target_col = self.preferred_col.unwrap_or(current_col);
+        let target_row = current_row as isize + delta_row;
+        if target_row < 0 {
+            return false;
+        }
+        let target_row_usize = target_row as usize;
+
+        let mut best: Option<(usize, usize)> = None; // (idx, distance)
+        for (idx, &(row, col)) in positions.iter().enumerate() {
+            if row != target_row_usize {
+                continue;
+            }
+            let dist = if col > target_col { col - target_col } else { target_col - col };
+            match best {
+                Some((_, best_dist)) if dist >= best_dist => {}
+                _ => {
+                    best = Some((idx, dist));
+                }
+            }
+        }
+
+        if let Some((idx, _)) = best {
+            self.cursor = idx;
+            self.preferred_col = Some(target_col);
+            true
+        } else {
+            false
+        }
+    }
+}
+
 impl ChatSession {
     pub async fn new(
         model_path: String,
@@ -277,19 +409,31 @@ impl ChatSession {
 
         // プロンプト行を起点に、毎回カーソルを戻して全体再描画する。
         let mut rendered_rows: usize = 1; // プロンプトのみの1行
-        let mut buffer = String::new();
+        let mut buffer = InputBuffer::default();
+        let (pos_col, pos_row) = cursor::position().unwrap_or((0, 0));
+        // カーソル位置はプロンプト末尾。端末差異を避けるため列は 0 固定、行は現在から開始。
+        let _ = pos_col; // keep for future debugging if needed
+        let anchor_col = 0;
+        let mut anchor_row = pos_row;
+        let mut cursor_row_offset: u16 = 0;
 
         let redraw = |stdout: &mut std::io::Stdout,
                       rendered_rows: &mut usize,
-                      buffer: &str|
+                      buffer: &InputBuffer,
+                      anchor_row: &mut u16,
+                      cursor_row_offset: &mut u16|
          -> Result<()> {
-            // 前回の表示開始位置（プロンプト行の先頭）に戻る
-            execute!(stdout, cursor::MoveToColumn(0))?;
-            if *rendered_rows > 1 {
-                execute!(stdout, cursor::MoveUp((*rendered_rows - 1) as u16))?;
-            }
-            let rows_used = render_input(stdout, PROMPT, INDENT, prompt_width, indent_width, buffer)?;
+            // 直前のカーソル位置からアンカーを再計算（スクロール発生時に追従する）
+            let (_, current_row) = cursor::position().unwrap_or((*anchor_row, 0));
+            *anchor_row = current_row.saturating_sub(*cursor_row_offset);
+
+            // プロンプト開始位置に戻る
+            execute!(stdout, cursor::MoveTo(anchor_col, *anchor_row))?;
+            let term_width = terminal::size().map(|(w, _)| w as usize).unwrap_or(80).max(1);
+            let (rows_used, cursor_pos) =
+                render_input(stdout, PROMPT, INDENT, prompt_width, indent_width, term_width, buffer)?;
             *rendered_rows = rows_used;
+            *cursor_row_offset = cursor_pos.0 as u16;
             Ok(())
         };
 
@@ -318,7 +462,7 @@ impl ChatSession {
                             execute!(stdout, Print("\r\n[Press Ctrl+C again to exit]\r\n"))?;
                             execute!(stdout, Print(PROMPT))?;
                             rendered_rows = 1;
-                            redraw(stdout, &mut rendered_rows, &buffer)?;
+                            redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                         }
 
                         // Ctrl+D to exit
@@ -336,8 +480,8 @@ impl ChatSession {
                             modifiers,
                             ..
                         } if modifiers.contains(KeyModifiers::CONTROL) => {
-                            buffer.push('\n');
-                            redraw(stdout, &mut rendered_rows, &buffer)?;
+                            buffer.insert_str("\n");
+                            redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                         }
 
                         // Shift+Enter for newline
@@ -346,8 +490,8 @@ impl ChatSession {
                             modifiers: KeyModifiers::SHIFT,
                             ..
                         } => {
-                            buffer.push('\n');
-                            redraw(stdout, &mut rendered_rows, &buffer)?;
+                            buffer.insert_str("\n");
+                            redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                         }
 
                         // Enter to submit
@@ -356,9 +500,9 @@ impl ChatSession {
                             modifiers: KeyModifiers::NONE,
                             ..
                         } => {
-                            redraw(stdout, &mut rendered_rows, &buffer)?;
+                            redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                             execute!(stdout, Print("\r\n"))?;
-                            return Ok(Some(buffer));
+                            return Ok(Some(buffer.to_string()));
                         }
 
                         // Backspace
@@ -366,8 +510,60 @@ impl ChatSession {
                             code: KeyCode::Backspace,
                             ..
                         } => {
-                            if pop_last_grapheme_width(&mut buffer).is_some() {
-                                redraw(stdout, &mut rendered_rows, &buffer)?;
+                            if buffer.backspace() {
+                                redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
+                            }
+                        }
+
+                        // Delete
+                        KeyEvent {
+                            code: KeyCode::Delete,
+                            ..
+                        } => {
+                            if buffer.delete() {
+                                redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
+                            }
+                        }
+
+                        // Move left
+                        KeyEvent {
+                            code: KeyCode::Left,
+                            ..
+                        } => {
+                            if buffer.move_left() {
+                                redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
+                            }
+                        }
+
+                        // Move right
+                        KeyEvent {
+                            code: KeyCode::Right,
+                            ..
+                        } => {
+                            if buffer.move_right() {
+                                redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
+                            }
+                        }
+
+                        // Move up
+                        KeyEvent {
+                            code: KeyCode::Up,
+                            ..
+                        } => {
+                            let term_width = terminal::size().map(|(w, _)| w as usize).unwrap_or(80).max(1);
+                            if buffer.move_vertical(-1, prompt_width, indent_width, term_width) {
+                                redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
+                            }
+                        }
+
+                        // Move down
+                        KeyEvent {
+                            code: KeyCode::Down,
+                            ..
+                        } => {
+                            let term_width = terminal::size().map(|(w, _)| w as usize).unwrap_or(80).max(1);
+                            if buffer.move_vertical(1, prompt_width, indent_width, term_width) {
+                                redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                             }
                         }
 
@@ -377,8 +573,8 @@ impl ChatSession {
                             modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
                             ..
                         } => {
-                            buffer.push(c);
-                            redraw(stdout, &mut rendered_rows, &buffer)?;
+                            buffer.insert_str(&c.to_string());
+                            redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                         }
 
                         _ => {
@@ -388,8 +584,8 @@ impl ChatSession {
                     Event::Paste(content) => {
                         // Normalize CRLF/CR to LF so表示が潰れない
                         let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
-                        buffer.push_str(&normalized);
-                        redraw(stdout, &mut rendered_rows, &buffer)?;
+                        buffer.insert_str(&normalized);
+                        redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                     }
                     _ => {
                         // Ignore other events
@@ -844,26 +1040,20 @@ impl ChatSession {
 
 }
 
-fn pop_last_grapheme_width(buffer: &mut String) -> Option<usize> {
-    let mut iter = buffer.grapheme_indices(true);
-    if let Some((idx, grapheme)) = iter.next_back() {
-        let width = UnicodeWidthStr::width(grapheme);
-        buffer.truncate(idx);
-        Some(width)
-    } else {
-        None
-    }
-}
-
 fn render_input(
     stdout: &mut std::io::Stdout,
     prompt: &str,
     indent: &str,
     prompt_width: usize,
     indent_width: usize,
-    buffer: &str,
-) -> Result<usize> {
-    let term_width = terminal::size().map(|(w, _)| w as usize).unwrap_or(80).max(1);
+    term_width: usize,
+    buffer: &InputBuffer,
+) -> Result<(usize, (usize, usize))> {
+    let positions = buffer.layout_positions(prompt_width, indent_width, term_width);
+    let cursor_pos = positions
+        .get(buffer.cursor)
+        .copied()
+        .unwrap_or((0, prompt_width));
 
     // 先頭に戻して以降をクリア
     execute!(
@@ -876,7 +1066,7 @@ fn render_input(
     let mut col = prompt_width;
     let mut rows_used = 1usize;
 
-    for grapheme in buffer.graphemes(true) {
+    for grapheme in &buffer.graphemes {
         if grapheme == "\n" {
             execute!(stdout, Print("\r\n"), Print(indent))?;
             rows_used += 1;
@@ -884,7 +1074,7 @@ fn render_input(
             continue;
         }
 
-        let w = UnicodeWidthStr::width(grapheme).max(1);
+        let w = UnicodeWidthStr::width(grapheme.as_str()).max(1);
         if col + w > term_width {
             execute!(stdout, Print("\r\n"), Print(indent))?;
             rows_used += 1;
@@ -895,9 +1085,14 @@ fn render_input(
         col += w;
     }
 
-    execute!(stdout, cursor::MoveToColumn(col as u16))?;
+    let current_row = rows_used.saturating_sub(1);
+    let rows_above_cursor = current_row.saturating_sub(cursor_pos.0);
+    if rows_above_cursor > 0 {
+        execute!(stdout, cursor::MoveUp(rows_above_cursor as u16))?;
+    }
+    execute!(stdout, cursor::MoveToColumn(cursor_pos.1 as u16))?;
     stdout.flush()?;
-    Ok(rows_used)
+    Ok((rows_used, cursor_pos))
 }
 
 /// 改行差分や末尾空白を無視して内容一致を判定
@@ -910,37 +1105,48 @@ fn contents_equal(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{pop_last_grapheme_width, ChatSession};
+    use super::{ChatSession, InputBuffer};
     use crate::mcp::types::{Tool, ToolInputSchema};
     use serde_json::json;
     use std::collections::HashMap;
 
     #[test]
-    fn pop_ascii_grapheme() {
-        let mut buffer = "abc".to_string();
-        assert_eq!(pop_last_grapheme_width(&mut buffer), Some(1));
-        assert_eq!(buffer, "ab");
+    fn input_buffer_insert_and_delete() {
+        let mut buf = InputBuffer::default();
+        buf.insert_str("abc");
+        assert_eq!(buf.to_string(), "abc");
+        assert!(buf.move_left());
+        assert!(buf.backspace());
+        assert_eq!(buf.to_string(), "ac");
+        assert!(buf.delete());
+        assert_eq!(buf.to_string(), "a");
     }
 
     #[test]
-    fn pop_fullwidth_grapheme() {
-        let mut buffer = "あい".to_string();
-        assert_eq!(pop_last_grapheme_width(&mut buffer), Some(2));
-        assert_eq!(buffer, "あ");
+    fn input_buffer_vertical_move_with_newline() {
+        let mut buf = InputBuffer::default();
+        buf.insert_str("abcd\nef");
+        // Cursor at end (row 1, col 4 with prompt width 2, indent 2, term 6)
+        let moved_up = buf.move_vertical(-1, 2, 2, 6);
+        assert!(moved_up);
+        assert_eq!(buf.cursor, 2); // After 'b'
+        let moved_down = buf.move_vertical(1, 2, 2, 6);
+        assert!(moved_down);
+        assert_eq!(buf.to_string(), "abcd\nef");
     }
 
     #[test]
-    fn pop_emoji_grapheme() {
-        let mut buffer = "ok😊".to_string();
-        assert_eq!(pop_last_grapheme_width(&mut buffer), Some(2));
-        assert_eq!(buffer, "ok");
-    }
+    fn input_buffer_backspace_handles_graphemes() {
+        let mut buf = InputBuffer::default();
+        buf.insert_str("ok😊");
+        assert!(buf.backspace());
+        assert_eq!(buf.to_string(), "ok");
+        assert!(buf.backspace());
+        assert_eq!(buf.to_string(), "o");
 
-    #[test]
-    fn pop_combining_grapheme() {
-        let mut buffer = "e\u{0301}".to_string(); // e + combining acute
-        assert_eq!(pop_last_grapheme_width(&mut buffer), Some(1));
-        assert_eq!(buffer, "");
+        buf.insert_str("e\u{0301}"); // combining acute
+        assert!(buf.backspace());
+        assert_eq!(buf.to_string(), "o");
     }
 
     #[test]

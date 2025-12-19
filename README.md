@@ -8,18 +8,18 @@ This project provides a command-line interface to interact with Large Language M
 
 I couldn't understand why Rockchip's samples use the adb command. That's why I created this program. I want to use the NPU on rock5B.
 
-| Model      | tps  | Notes                             |
-| ---------- | ---- | --------------------------------- |
-| Qwen3 1.7B | 11.9 | Fast but accuracy is poor         |
-| Qwen3 4B   | 2.9  | Too slow                          |
-| Gemma3 1B  | 12   | Fast but MCP client does not work |
-| Gemma3 4B  | 2.9  | Too slow                          |
+| Model      | Token Per Second | Notes                             |
+| ---------- | ---------------- | --------------------------------- |
+| Qwen3 1.7B | 11.9             | Fast but accuracy is poor         |
+| Qwen3 4B   | 2.9              | Too slow                          |
+| Gemma3 1B  | 12               | Fast but MCP client does not work |
+| Gemma3 4B  | 2.9              | Too slow                          |
 
 The Rock5B's NPU delivers only 6 TOPS, so please don't expect too much.
 
 ## Features
 
-- **Interactive Chat**: Command-line chat interface with streaming output
+- **Interactive Chat**: Command-line chat interface with streaming output and multiline editing (arrow keys for cursor movement, insert at cursor, Shift+Enter for newline)
 - **Safe Rust Wrapper**: Type-safe Rust bindings for the C library
 - **UTF-8 Handling**: Proper handling of incomplete multi-byte UTF-8 sequences during streaming
 - **Error Handling**: Comprehensive error handling with `anyhow`
@@ -119,6 +119,7 @@ The binary will be located at:
 ### Commands
 
 - Type your message and press Enter to send
+- Use arrow keys to move the cursor across lines; text is inserted at the cursor. Shift+Enter (or Ctrl+J) inserts a newline.
 - Type `exit` or `quit` to end the session
 - Press `Ctrl+C and Ctrl+C` to interrupt and exit
 
@@ -158,9 +159,8 @@ rkllm-cli/
 
 ### Chat Logic (chat.rs)
 
-- Interactive readline-based interface using `rustyline`
+- Interactive multiline interface using `crossterm` (arrow-key cursor 移動・挿入、Shift+Enter で改行)
 - Streaming output support
-- Command history
 - File operations: detects referenced paths, loads existing files as context, treats missing paths as output targets, and remaps single-target outputs when the model writes to the input path.
 
 ## Configuration
