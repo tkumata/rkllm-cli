@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Arc;
@@ -93,6 +94,7 @@ impl StdioTransport {
 
     /// Spawn a task to read and log stderr from the server
     fn spawn_stderr_logger(stderr: ChildStderr, server_name: String) {
+        let tui_enabled = is_tui_enabled();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr);
             let mut line = String::new();
@@ -105,11 +107,15 @@ impl StdioTransport {
                         // Only print non-empty lines
                         let trimmed = line.trim();
                         if !trimmed.is_empty() {
-                            eprintln!("[MCP Server: {}]: {}", server_name, trimmed);
+                            if !tui_enabled {
+                                eprintln!("[MCP Server: {}]: {}", server_name, trimmed);
+                            }
                         }
                     }
                     Err(e) => {
-                        eprintln!("[MCP Server: {}] stderr read error: {}", server_name, e);
+                        if !tui_enabled {
+                            eprintln!("[MCP Server: {}] stderr read error: {}", server_name, e);
+                        }
                         break;
                     }
                 }
@@ -240,10 +246,12 @@ impl StdioTransport {
                 } else {
                     // Received response for different request - this shouldn't happen
                     // in our usage pattern, but we'll ignore it
-                    eprintln!(
-                        "[MCP: {}] Warning: Received response for unexpected request ID: {:?}",
-                        self.server_name, response.id
-                    );
+                    if !is_tui_enabled() {
+                        eprintln!(
+                            "[MCP: {}] Warning: Received response for unexpected request ID: {:?}",
+                            self.server_name, response.id
+                        );
+                    }
                 }
             } else {
                 // This is a server-initiated notification - handle it
@@ -264,21 +272,27 @@ impl StdioTransport {
             "notifications/progress" => {
                 // Progress notification - could display progress
                 if let Some(params) = value.get("params") {
-                    eprintln!("[MCP: {}] Progress: {:?}", self.server_name, params);
+                    if !is_tui_enabled() {
+                        eprintln!("[MCP: {}] Progress: {:?}", self.server_name, params);
+                    }
                 }
             }
             "notifications/message" => {
                 // Message notification - server wants to show something to user
                 if let Some(params) = value.get("params") {
-                    eprintln!("[MCP: {}] Message: {:?}", self.server_name, params);
+                    if !is_tui_enabled() {
+                        eprintln!("[MCP: {}] Message: {:?}", self.server_name, params);
+                    }
                 }
             }
             _ => {
                 // Unknown notification - log it
-                eprintln!(
-                    "[MCP: {}] Unknown notification '{}': {:?}",
-                    self.server_name, method, value
-                );
+                if !is_tui_enabled() {
+                    eprintln!(
+                        "[MCP: {}] Unknown notification '{}': {:?}",
+                        self.server_name, method, value
+                    );
+                }
             }
         }
     }
@@ -308,6 +322,10 @@ impl StdioTransport {
         let mut child = self.child.lock().await;
         child.try_wait().ok().flatten().is_none()
     }
+}
+
+fn is_tui_enabled() -> bool {
+    env::var("RKLLM_TUI").ok().as_deref() == Some("1")
 }
 
 impl Drop for StdioTransport {
