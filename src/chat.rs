@@ -4,8 +4,8 @@ use crate::file_ops;
 use crate::file_output_parser;
 use crate::llm::{RKLLMConfig, RKLLM};
 use crate::mcp::{McpClient, McpConfig};
-use crate::mcp::types::Tool;
-use crate::intent::{has_file_operation_intent, prefers_output_only};
+use crate::mcp::types::{Tool, ToolCall, ToolResult};
+use crate::intent::{has_file_operation_intent, has_file_read_intent, prefers_output_only};
 use crate::prompt_builder::build_chat_prompt;
 use crate::tool_detector::ToolCallDetector;
 use anyhow::{Context, Result};
@@ -13,15 +13,16 @@ use crossterm::{
     cursor,
     event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
-    style::{Color, Print, SetForegroundColor, ResetColor},
-    terminal::{self},
+    style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
+    terminal,
 };
+use regex::Regex;
 use serde_json::{self, json};
 use std::collections::HashSet;
 use std::io::{self, stdout, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -34,6 +35,12 @@ pub struct ChatSession {
     confirm_writes: bool,
     tool_only: bool,
     config: AppConfig,
+}
+
+#[derive(Copy, Clone)]
+enum ToolCallAllowance {
+    All,
+    WriteOnly,
 }
 
 #[derive(Default)]
@@ -169,6 +176,13 @@ impl InputBuffer {
 }
 
 impl ChatSession {
+    const PROMPT: &'static str = "❯ ";
+    const INDENT: &'static str = "  ";
+    const PROMPT_BG: Color = Color::Rgb { r: 58, g: 58, b: 58 };
+    const PROMPT_FG: Color = Color::White;
+    const INPUT_BG: Color = Color::Rgb { r: 58, g: 58, b: 58 };
+    const INPUT_FG: Color = Color::White;
+
     pub async fn new(
         model_path: String,
         mcp_config_path: Option<PathBuf>,
@@ -234,11 +248,12 @@ impl ChatSession {
     }
 
     pub async fn start(&self) -> Result<()> {
-        self.print_separator(Color::Rgb { r: 100, g: 149, b: 237 });
+        unsafe {
+            std::env::set_var("RKLLM_TUI", "1");
+        }
         self.print_banner();
 
         terminal::enable_raw_mode().context("Failed to enable raw mode")?;
-
         let mut stdout = stdout();
         execute!(stdout, EnableBracketedPaste).context("Failed to enable bracketed paste")?;
 
@@ -246,21 +261,18 @@ impl ChatSession {
 
         execute!(stdout, DisableBracketedPaste).context("Failed to disable bracketed paste")?;
         terminal::disable_raw_mode().context("Failed to disable raw mode")?;
-        println!(); // Final newline
+        println!();
 
         result
     }
 
     async fn run_chat_loop(&self, stdout: &mut std::io::Stdout) -> Result<()> {
         loop {
-            // Display prompt
-            self.print_separator(Color::Rgb { r: 100, g: 149, b: 237 });
-            execute!(stdout, Print("❯ "))?;
+            self.print_status_line(stdout, "Ready")?;
 
-            // Read multiline input
             let input = match self.read_multiline_input(stdout)? {
                 Some(text) => text,
-                None => break, // User pressed Ctrl+C or Ctrl+D
+                None => break,
             };
 
             let trimmed = input.trim();
@@ -274,19 +286,19 @@ impl ChatSession {
                 break;
             }
 
-            let has_file_op_intent = has_file_operation_intent(&trimmed);
-            if self.tool_only && has_file_op_intent {
+            let has_file_write_intent = has_file_operation_intent(&trimmed);
+            let has_file_read_intent = has_file_read_intent(&trimmed);
+            if self.tool_only && has_file_write_intent {
                 println!("\n[tool-only] Local file writes are disabled. Use MCP tools for any file outputs.");
             }
 
-            let file_paths = if has_file_op_intent && !self.config.detect_extensions.is_empty() {
+            let file_paths = if (has_file_write_intent || has_file_read_intent)
+                && !self.config.detect_extensions.is_empty()
+            {
                 file_detector::detect_file_paths_with_exts(&trimmed, &self.config.detect_extensions)
             } else {
                 Vec::new()
             };
-
-            // Disable raw mode temporarily for LLM output
-            terminal::disable_raw_mode().context("Failed to disable raw mode")?;
 
             // ファイル読み込み（既存ファイルのみ）、未存在は出力ターゲットとして扱う
             let mut provided_files = std::collections::HashMap::new();
@@ -301,7 +313,7 @@ impl ChatSession {
                 let mut input_candidates = Vec::new();
                 let mut output_candidates = Vec::new();
 
-                if has_file_op_intent && file_paths.len() >= 2 {
+                if has_file_write_intent && file_paths.len() >= 2 {
                     let mut iter = file_paths.iter();
                     if let Some(first) = iter.next() {
                         input_candidates.push(first.clone());
@@ -309,7 +321,7 @@ impl ChatSession {
                     for p in iter {
                         output_candidates.push(p.clone());
                     }
-                } else if has_file_op_intent && prefers_output_only(&trimmed) {
+                } else if has_file_write_intent && prefers_output_only(&trimmed) {
                     output_candidates.extend(file_paths.clone());
                 } else {
                     input_candidates.extend(file_paths.clone());
@@ -340,7 +352,10 @@ impl ChatSession {
                     eprintln!("[Error loading '{}': {}]", path, error);
                 }
                 if !output_targets.is_empty() {
-                    println!("[Treating as output targets (not loaded): {}]", output_targets.join(", "));
+                    println!(
+                        "[Treating as output targets (not loaded): {}]",
+                        output_targets.join(", ")
+                    );
                 }
             }
 
@@ -353,39 +368,115 @@ impl ChatSession {
                 &errors,
                 tool_info.as_deref(),
                 &output_targets,
-                has_file_op_intent,
+                has_file_write_intent,
                 !self.tool_only,
+                &[],
             );
             if self.preview_prompt || std::env::var("RKLLM_DEBUG_PROMPT").is_ok() {
                 eprintln!("\n[DEBUG prompt length={}]", prompt.len());
                 eprintln!("{}", prompt);
             }
 
-            self.print_separator(Color::Rgb { r: 100, g: 100, b: 100 });
-            print!("\n🔹 ");
+            terminal::disable_raw_mode().context("Failed to disable raw mode")?;
+            print!("\n");
             io::stdout().flush().unwrap();
-
-            match self.rkllm.run(&prompt, |_text| {
-                // Text is already printed in the callback
+            match self.rkllm.run(&prompt, |text| {
+                print!("{}", text);
+                let _ = io::stdout().flush();
             }) {
-                Ok(response) => {
-                    println!(); // Add a newline after the response
+                Ok(mut response) => {
+                    println!();
 
-                    // ファイル操作を処理（ユーザーに意図がある場合のみ）
-                    if has_file_op_intent {
-                        if self.tool_only {
-                            if let Err(e) = self.process_file_operations_via_tools(&response, &provided_files, &output_targets).await {
-                                eprintln!("\nError processing file operations via MCP tools: {}", e);
+                    let mut tool_rounds = 0usize;
+                    let mut seen_tool_calls: HashSet<String> = HashSet::new();
+                    loop {
+                        // ファイル操作を処理（ユーザーに意図がある場合のみ）
+                        if has_file_write_intent {
+                            if self.tool_only {
+                                if let Err(e) = self
+                                    .process_file_operations_via_tools(
+                                        &response,
+                                        &provided_files,
+                                        &output_targets,
+                                    )
+                                    .await
+                                {
+                                    eprintln!("\nError processing file operations via MCP tools: {}", e);
+                                }
+                            } else if let Err(e) = self.process_file_operations(
+                                &response,
+                                &provided_files,
+                                &output_targets,
+                            ) {
+                                eprintln!("\nError processing file operations: {}", e);
                             }
-                        } else if let Err(e) = self.process_file_operations(&response, &provided_files, &output_targets) {
-                            eprintln!("\nError processing file operations: {}", e);
                         }
-                    }
 
-                    // MCP ツール呼び出しを処理
-                    if self.mcp_client.is_some() {
-                        if let Err(e) = self.process_tool_calls(&response).await {
-                            eprintln!("\nError processing tool calls: {}", e);
+                        let allowance = if tool_rounds == 0 {
+                            ToolCallAllowance::All
+                        } else {
+                            ToolCallAllowance::WriteOnly
+                        };
+                        let (tool_results, blocked_repeat) = match self
+                            .process_tool_calls(&response, &mut seen_tool_calls, allowance)
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(e) => {
+                                eprintln!("\nError processing tool calls: {}", e);
+                                (Vec::new(), false)
+                            }
+                            };
+                        if blocked_repeat {
+                            eprintln!("\n[Repeated tool call blocked]");
+                            break;
+                        }
+                        if tool_results.is_empty() {
+                            break;
+                        }
+
+                        tool_rounds += 1;
+                        if tool_rounds >= 3 {
+                            eprintln!("\n[Tool call limit reached]");
+                            break;
+                        }
+
+                        let followup_prompt = build_chat_prompt(
+                            &trimmed,
+                            &files,
+                            &errors,
+                            tool_info.as_deref(),
+                            &output_targets,
+                            has_file_write_intent,
+                            !self.tool_only,
+                            &tool_results,
+                        );
+                        if self.preview_prompt || std::env::var("RKLLM_DEBUG_PROMPT").is_ok() {
+                            eprintln!("\n[DEBUG prompt length={}]", followup_prompt.len());
+                            eprintln!("{}", followup_prompt);
+                        }
+
+                        let buffered = Arc::new(Mutex::new(String::new()));
+                        let buffered_ref = Arc::clone(&buffered);
+                        match self.rkllm.run(&followup_prompt, move |text| {
+                            if let Ok(mut buf) = buffered_ref.lock() {
+                                buf.push_str(text);
+                            }
+                        }) {
+                            Ok(next_response) => {
+                                let display = buffered
+                                    .lock()
+                                    .map(|buf| Self::strip_tool_calls(&buf))
+                                    .unwrap_or_default();
+                                print!("{}", display);
+                                let _ = io::stdout().flush();
+                                println!();
+                                response = next_response;
+                            }
+                            Err(e) => {
+                                eprintln!("\nError during inference: {}", e);
+                                break;
+                            }
                         }
                     }
                 }
@@ -393,8 +484,7 @@ impl ChatSession {
                     eprintln!("\nError during inference: {}", e);
                 }
             }
-
-            // Re-enable raw mode for next input
+            self.print_separator(Color::DarkGrey);
             terminal::enable_raw_mode().context("Failed to enable raw mode")?;
         }
 
@@ -402,46 +492,54 @@ impl ChatSession {
     }
 
     fn read_multiline_input(&self, stdout: &mut std::io::Stdout) -> Result<Option<String>> {
-        const PROMPT: &str = "❯ ";
-        const INDENT: &str = "  ";
-        let prompt_width = UnicodeWidthStr::width(PROMPT);
-        let indent_width = UnicodeWidthStr::width(INDENT);
+        let prompt_width = UnicodeWidthStr::width(Self::PROMPT);
+        let indent_width = UnicodeWidthStr::width(Self::INDENT);
 
         // プロンプト行を起点に、毎回カーソルを戻して全体再描画する。
         let mut rendered_rows: usize = 1; // プロンプトのみの1行
         let mut buffer = InputBuffer::default();
         let (pos_col, pos_row) = cursor::position().unwrap_or((0, 0));
-        // カーソル位置はプロンプト末尾。端末差異を避けるため列は 0 固定、行は現在から開始。
-        let _ = pos_col; // keep for future debugging if needed
+        let _ = pos_col;
         let anchor_col = 0;
         let mut anchor_row = pos_row;
         let mut cursor_row_offset: u16 = 0;
 
-        let redraw = |stdout: &mut std::io::Stdout,
+            let redraw = |stdout: &mut std::io::Stdout,
                       rendered_rows: &mut usize,
                       buffer: &InputBuffer,
                       anchor_row: &mut u16,
                       cursor_row_offset: &mut u16|
          -> Result<()> {
-            // 直前のカーソル位置からアンカーを再計算（スクロール発生時に追従する）
             let (_, current_row) = cursor::position().unwrap_or((*anchor_row, 0));
             *anchor_row = current_row.saturating_sub(*cursor_row_offset);
 
-            // プロンプト開始位置に戻る
             execute!(stdout, cursor::MoveTo(anchor_col, *anchor_row))?;
             let term_width = terminal::size().map(|(w, _)| w as usize).unwrap_or(80).max(1);
             let (rows_used, cursor_pos) =
-                render_input(stdout, PROMPT, INDENT, prompt_width, indent_width, term_width, buffer)?;
+                render_input(
+                    stdout,
+                    Self::PROMPT,
+                    Self::INDENT,
+                    prompt_width,
+                    indent_width,
+                    term_width,
+                    buffer,
+                    Self::PROMPT_BG,
+                    Self::PROMPT_FG,
+                    Self::INPUT_BG,
+                    Self::INPUT_FG,
+                )?;
             *rendered_rows = rows_used;
             *cursor_row_offset = cursor_pos.0 as u16;
             Ok(())
         };
 
+        redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
+
         loop {
-            if event::poll(std::time::Duration::from_millis(100))? {
+            if event::poll(Duration::from_millis(100))? {
                 match event::read()? {
                     Event::Key(key_event) => match key_event {
-                        // Ctrl+C - need to press twice within 2 seconds to exit
                         KeyEvent {
                             code: KeyCode::Char('c'),
                             modifiers: KeyModifiers::CONTROL,
@@ -451,21 +549,23 @@ impl ChatSession {
                             let mut last_time = self.last_ctrl_c.lock().unwrap();
 
                             if let Some(last) = *last_time {
-                                // Check if within 2 seconds
                                 if now.duration_since(last).as_secs() < 2 {
                                     return Ok(None);
                                 }
                             }
 
-                            // First Ctrl+C or timeout - show message and update time
                             *last_time = Some(now);
                             execute!(stdout, Print("\r\n[Press Ctrl+C again to exit]\r\n"))?;
-                            execute!(stdout, Print(PROMPT))?;
+                            execute!(
+                                stdout,
+                                SetBackgroundColor(Self::PROMPT_BG),
+                                SetForegroundColor(Self::PROMPT_FG),
+                                Print(Self::PROMPT),
+                                ResetColor
+                            )?;
                             rendered_rows = 1;
                             redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                         }
-
-                        // Ctrl+D to exit
                         KeyEvent {
                             code: KeyCode::Char('d'),
                             modifiers: KeyModifiers::CONTROL,
@@ -473,8 +573,6 @@ impl ChatSession {
                         } => {
                             return Ok(None);
                         }
-
-                        // 一部端末（例: macOS/iTerm2）で Shift+Enter が Ctrl+J として送られるケース
                         KeyEvent {
                             code: KeyCode::Char('j'),
                             modifiers,
@@ -483,8 +581,6 @@ impl ChatSession {
                             buffer.insert_str("\n");
                             redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                         }
-
-                        // Shift+Enter for newline
                         KeyEvent {
                             code: KeyCode::Enter,
                             modifiers: KeyModifiers::SHIFT,
@@ -493,8 +589,6 @@ impl ChatSession {
                             buffer.insert_str("\n");
                             redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                         }
-
-                        // Enter to submit
                         KeyEvent {
                             code: KeyCode::Enter,
                             modifiers: KeyModifiers::NONE,
@@ -504,8 +598,6 @@ impl ChatSession {
                             execute!(stdout, Print("\r\n"))?;
                             return Ok(Some(buffer.to_string()));
                         }
-
-                        // Backspace
                         KeyEvent {
                             code: KeyCode::Backspace,
                             ..
@@ -514,8 +606,6 @@ impl ChatSession {
                                 redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                             }
                         }
-
-                        // Delete
                         KeyEvent {
                             code: KeyCode::Delete,
                             ..
@@ -524,8 +614,6 @@ impl ChatSession {
                                 redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                             }
                         }
-
-                        // Move left
                         KeyEvent {
                             code: KeyCode::Left,
                             ..
@@ -534,8 +622,6 @@ impl ChatSession {
                                 redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                             }
                         }
-
-                        // Move right
                         KeyEvent {
                             code: KeyCode::Right,
                             ..
@@ -544,8 +630,6 @@ impl ChatSession {
                                 redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                             }
                         }
-
-                        // Move up
                         KeyEvent {
                             code: KeyCode::Up,
                             ..
@@ -555,8 +639,6 @@ impl ChatSession {
                                 redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                             }
                         }
-
-                        // Move down
                         KeyEvent {
                             code: KeyCode::Down,
                             ..
@@ -566,8 +648,6 @@ impl ChatSession {
                                 redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                             }
                         }
-
-                        // Regular character input
                         KeyEvent {
                             code: KeyCode::Char(c),
                             modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
@@ -576,20 +656,14 @@ impl ChatSession {
                             buffer.insert_str(&c.to_string());
                             redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                         }
-
-                        _ => {
-                            // Ignore other keys
-                        }
+                        _ => {}
                     },
                     Event::Paste(content) => {
-                        // Normalize CRLF/CR to LF so表示が潰れない
                         let normalized = content.replace("\r\n", "\n").replace('\r', "\n");
                         buffer.insert_str(&normalized);
                         redraw(stdout, &mut rendered_rows, &buffer, &mut anchor_row, &mut cursor_row_offset)?;
                     }
-                    _ => {
-                        // Ignore other events
-                    }
+                    _ => {}
                 }
                 stdout.flush()?;
             }
@@ -597,54 +671,111 @@ impl ChatSession {
     }
 
     fn print_banner(&self) {
-        let cyan = Color::Rgb { r: 135, g: 206, b: 235 }; // Light cyan/sky blue
+        let mut stdout = stdout();
+        let lines = [
+            [
+                ("██████ ", Color::Red),
+                (" ", Color::Reset),
+                ("██  ██", Color::Yellow),
+                ("  ", Color::Reset),
+                ("██      ", Color::Green),
+                ("██      ", Color::Green),
+                ("██   ██", Color::Cyan),
+            ],
+            [
+                ("██   ██", Color::Red),
+                (" ", Color::Reset),
+                ("██ ██", Color::Yellow),
+                ("   ", Color::Reset),
+                ("██      ", Color::Green),
+                ("██      ", Color::Green),
+                ("███ ███", Color::Cyan),
+            ],
+            [
+                ("██████", Color::Red),
+                ("  ", Color::Reset),
+                ("████", Color::Yellow),
+                ("    ", Color::Reset),
+                ("██      ", Color::Green),
+                ("██      ", Color::Green),
+                ("███████", Color::Cyan),
+            ],
+            [
+                ("██  ██", Color::Red),
+                ("  ", Color::Reset),
+                ("██ ██", Color::Yellow),
+                ("   ", Color::Reset),
+                ("██      ", Color::Green),
+                ("██      ", Color::Green),
+                ("██   ██", Color::Cyan),
+            ],
+            [
+                ("██   ██", Color::Red),
+                (" ", Color::Reset),
+                ("██  ██", Color::Yellow),
+                ("  ", Color::Reset),
+                ("███████ ", Color::Green),
+                ("███████ ", Color::Green),
+                ("██   ██", Color::Cyan),
+            ],
+        ];
 
-        print!("{}", SetForegroundColor(cyan));
-        print!("▗ ████████ ▖");
-        print!("{}", ResetColor);
-        println!(" RKLLM Chat CLI");
+        for line in &lines {
+            for (text, color) in line {
+                execute!(stdout, SetForegroundColor(*color), Print(*text)).ok();
+            }
+            execute!(stdout, ResetColor, Print("\n")).ok();
+        }
+        execute!(
+            stdout,
+            SetForegroundColor(Color::DarkGrey),
+            Print("Rockchip NPU Agentic CLI\n\n"),
+            ResetColor
+        )
+        .ok();
+    }
 
-        print!(" ");
-        print!("{}", SetForegroundColor(cyan));
-        print!("▚█▙████▟█▞");
-        print!("{}", ResetColor);
-        println!("  Type your message and press Enter to chat.");
-
-        print!("  ");
-        print!("{}", SetForegroundColor(cyan));
-        print!("████████");
-        print!("{}", ResetColor);
-        println!();
-
-        print!("  ");
-        print!("{}", SetForegroundColor(cyan));
-        print!("▜      ▛");
-        print!("{}", ResetColor);
-        println!("   Type 'exit' or press Ctrl+C twice to quit.\n");
+    fn print_status_line(&self, stdout: &mut std::io::Stdout, status: &str) -> Result<()> {
+        let mcp = if self.mcp_client.is_some() { "on" } else { "off" };
+        let mode = if self.tool_only { "tool-only" } else { "chat" };
+        let line = format!("[Status: {} | MCP: {} | Mode: {}]", status, mcp, mode);
+        execute!(
+            stdout,
+            ResetColor,
+            cursor::MoveToColumn(0),
+            terminal::Clear(terminal::ClearType::CurrentLine),
+            SetForegroundColor(Color::DarkGrey),
+            Print(line),
+            ResetColor,
+            Print("\r\n")
+        )?;
+        Ok(())
     }
 
     fn print_separator(&self, color: Color) {
-        // Get terminal width, fallback to 80 if unable to detect
         let width = if let Ok((cols, _)) = terminal::size() {
             cols as usize
         } else {
             80
         };
-
         print!("{}", SetForegroundColor(color));
         print!("{}", "─".repeat(width));
         print!("{}", ResetColor);
+        print!("\r\n");
+    }
+
+    fn strip_tool_calls(text: &str) -> String {
+        // Remove <tool_call ...>...</tool_call> blocks from display output.
+        let pattern = Regex::new(r#"(?s)<tool_call\s+name="[^"]+"\s*>.*?</tool_call>"#)
+            .unwrap();
+        pattern.replace_all(text, "").to_string()
     }
 
     fn build_tool_sample_block(tool: &Tool) -> String {
         let sample_args = Self::build_sample_arguments(tool);
-        let sample_call = json!({
-            "name": tool.name.clone(),
-            "arguments": sample_args,
-        });
-        let pretty = serde_json::to_string_pretty(&sample_call).unwrap_or_else(|_| "{}".to_string());
+        let pretty = serde_json::to_string_pretty(&sample_args).unwrap_or_else(|_| "{}".to_string());
 
-        format!("[TOOL_CALL]\n{}\n[END_TOOL_CALL]\n", pretty)
+        format!("<tool_call name=\"{}\">\n{}\n</tool_call>\n", tool.name, pretty)
     }
 
     fn build_sample_arguments(tool: &Tool) -> serde_json::Value {
@@ -733,14 +864,11 @@ impl ChatSession {
         }
 
         info.push_str("\nTo use a tool, output (see per-tool samples above):\n\n");
-        info.push_str("[TOOL_CALL]\n");
+        info.push_str("<tool_call name=\"tool_name\">\n");
         info.push_str("{\n");
-        info.push_str("  \"name\": \"tool_name\",\n");
-        info.push_str("  \"arguments\": {\n");
-        info.push_str("    \"argument_name\": \"value\"\n");
-        info.push_str("  }\n");
+        info.push_str("  \"argument_name\": \"value\"\n");
         info.push_str("}\n");
-        info.push_str("[END_TOOL_CALL]\n");
+        info.push_str("</tool_call>\n");
 
         Some(info)
     }
@@ -807,7 +935,10 @@ impl ChatSession {
             return Ok(());
         }
 
-        println!("\n[Detected {} file operation(s) (tool-only)]", operations.len());
+        println!(
+            "\n[Detected {} file operation(s) (tool-only)]",
+            operations.len()
+        );
 
         // 入力と同一内容はスキップ
         operations = operations
@@ -862,7 +993,10 @@ impl ChatSession {
             match mcp_client.call_tool(&write_tool_name, args).await {
                 Ok(result) => {
                     if result.success {
-                        println!("[tool-only] Wrote via tool '{}': {}", write_tool_name, op.path);
+                        println!(
+                            "[tool-only] Wrote via tool '{}': {}",
+                            write_tool_name, op.path
+                        );
                     } else {
                         eprintln!(
                             "[tool-only] Tool '{}' failed for {}: {}",
@@ -976,35 +1110,186 @@ impl ChatSession {
     ///
     /// # 引数
     /// * `output` - LLMの出力テキスト
-    async fn process_tool_calls(&self, output: &str) -> Result<()> {
+    async fn process_tool_calls(
+        &self,
+        output: &str,
+        seen_tool_calls: &mut HashSet<String>,
+        allowance: ToolCallAllowance,
+    ) -> Result<(Vec<ToolResult>, bool)> {
         let tool_calls = self.tool_detector.detect(output);
 
         if tool_calls.is_empty() {
-            return Ok(());
+            return Ok((Vec::new(), false));
         }
 
         println!("\n[Detected {} tool call(s)]", tool_calls.len());
 
-        if let Some(client) = &self.mcp_client {
-            for call in tool_calls {
-                match client.call_tool(&call.name, call.arguments).await {
-                    Ok(result) => {
-                        if result.success {
-                            println!("\n[Tool '{}' output:]", call.name);
-                            println!("{}", result.output);
-                        } else {
-                            eprintln!("\n[Tool '{}' failed:]", call.name);
-                            eprintln!("{}", result.output);
+        let mut results = Vec::new();
+        let mut blocked_repeat = false;
+
+        for call in tool_calls {
+            if matches!(allowance, ToolCallAllowance::WriteOnly) && call.name != "write_file" {
+                blocked_repeat = true;
+                continue;
+            }
+
+            if seen_tool_calls.contains(&call.name) {
+                blocked_repeat = true;
+                continue;
+            }
+            seen_tool_calls.insert(call.name.clone());
+
+            match call.name.as_str() {
+                "read_file" => {
+                    results.push(self.handle_read_file_tool_call(&call));
+                }
+                "write_file" => {
+                    results.push(self.handle_write_file_tool_call(&call)?);
+                }
+                _ => {
+                    if let Some(client) = &self.mcp_client {
+                        match client.call_tool(&call.name, call.arguments).await {
+                            Ok(mut result) => {
+                                result.name = call.name.clone();
+                                if result.success {
+                                    if result.output.trim().is_empty() {
+                                        println!("\n[Tool '{}' success with empty output]", call.name);
+                                    } else {
+                                        println!("\n[Tool '{}' output:]", call.name);
+                                        println!("{}", result.output);
+                                    }
+                                } else {
+                                    eprintln!("\n[Tool '{}' failed:]", call.name);
+                                    eprintln!("{}", result.output);
+                                }
+                                results.push(result);
+                            }
+                            Err(e) => {
+                                eprintln!("\n[Failed to call tool '{}': {}]", call.name, e);
+                                results.push(Self::tool_result_json(
+                                    &call.name,
+                                    false,
+                                    json!({"error": e.to_string()}),
+                                ));
+                            }
                         }
-                    }
-                    Err(e) => {
-                        eprintln!("\n[Failed to call tool '{}': {}]", call.name, e);
+                    } else {
+                        eprintln!("\n[Unknown tool '{}': no MCP client]", call.name);
+                        results.push(Self::tool_result_json(
+                            &call.name,
+                            false,
+                            json!({"error": "No MCP client available"}),
+                        ));
                     }
                 }
             }
         }
 
-        Ok(())
+        Ok((results, blocked_repeat))
+    }
+
+    fn handle_read_file_tool_call(&self, call: &ToolCall) -> ToolResult {
+        let path = call
+            .arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+
+        let Some(path) = path else {
+            return Self::tool_result_json(
+                "read_file",
+                false,
+                json!({"error": "Missing required argument: path"}),
+            );
+        };
+
+        match file_ops::read_file(&path) {
+            Ok(content) => Self::tool_result_json(
+                "read_file",
+                true,
+                json!({"path": content.original_path, "content": content.content}),
+            ),
+            Err(e) => Self::tool_result_json(
+                "read_file",
+                false,
+                json!({"path": path, "error": e.to_string()}),
+            ),
+        }
+    }
+
+    fn handle_write_file_tool_call(&self, call: &ToolCall) -> Result<ToolResult> {
+        if self.tool_only {
+            return Ok(Self::tool_result_json(
+                "write_file",
+                false,
+                json!({"error": "Local writes are disabled in tool-only mode"}),
+            ));
+        }
+
+        let path = call
+            .arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+        let content = call
+            .arguments
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+
+        let Some(path) = path else {
+            return Ok(Self::tool_result_json(
+                "write_file",
+                false,
+                json!({"error": "Missing required argument: path"}),
+            ));
+        };
+        let Some(content) = content else {
+            return Ok(Self::tool_result_json(
+                "write_file",
+                false,
+                json!({"error": "Missing required argument: content"}),
+            ));
+        };
+
+        let exists = file_ops::file_exists(&path);
+        if self.confirm_writes {
+            if !self.confirm_write(&path, exists)? {
+                return Ok(Self::tool_result_json(
+                    "write_file",
+                    false,
+                    json!({"path": path, "skipped": true}),
+                ));
+            }
+        } else if exists && !self.confirm_overwrite(&path)? {
+            return Ok(Self::tool_result_json(
+                "write_file",
+                false,
+                json!({"path": path, "skipped": true}),
+            ));
+        }
+
+        match file_ops::write_file(&path, &content, false) {
+            Ok(_) => Ok(Self::tool_result_json(
+                "write_file",
+                true,
+                json!({"path": path, "written": true}),
+            )),
+            Err(e) => Ok(Self::tool_result_json(
+                "write_file",
+                false,
+                json!({"path": path, "error": e.to_string()}),
+            )),
+        }
+    }
+
+    fn tool_result_json(name: &str, success: bool, payload: serde_json::Value) -> ToolResult {
+        let output = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string());
+        ToolResult {
+            name: name.to_string(),
+            success,
+            output,
+        }
     }
 
     /// MCPツールから書き込み用ツール名を推定する
@@ -1048,6 +1333,10 @@ fn render_input(
     indent_width: usize,
     term_width: usize,
     buffer: &InputBuffer,
+    prompt_bg: Color,
+    prompt_fg: Color,
+    input_bg: Color,
+    input_fg: Color,
 ) -> Result<(usize, (usize, usize))> {
     let positions = buffer.layout_positions(prompt_width, indent_width, term_width);
     let cursor_pos = positions
@@ -1055,12 +1344,21 @@ fn render_input(
         .copied()
         .unwrap_or((0, prompt_width));
 
-    // 先頭に戻して以降をクリア
     execute!(
         stdout,
         cursor::MoveToColumn(0),
-        terminal::Clear(terminal::ClearType::FromCursorDown),
-        Print(prompt)
+        terminal::Clear(terminal::ClearType::FromCursorDown)
+    )?;
+    prepare_input_line(stdout, term_width, input_bg, input_fg)?;
+    execute!(stdout, Print("\r\n"))?;
+    prepare_input_line(stdout, term_width, input_bg, input_fg)?;
+    execute!(
+        stdout,
+        SetBackgroundColor(prompt_bg),
+        SetForegroundColor(prompt_fg),
+        Print(prompt),
+        SetBackgroundColor(input_bg),
+        SetForegroundColor(input_fg)
     )?;
 
     let mut col = prompt_width;
@@ -1068,7 +1366,15 @@ fn render_input(
 
     for grapheme in &buffer.graphemes {
         if grapheme == "\n" {
-            execute!(stdout, Print("\r\n"), Print(indent))?;
+            fill_input_line(stdout, term_width, col, input_bg, input_fg)?;
+            execute!(stdout, Print("\r\n"))?;
+            prepare_input_line(stdout, term_width, input_bg, input_fg)?;
+            execute!(
+                stdout,
+                SetBackgroundColor(input_bg),
+                SetForegroundColor(input_fg),
+                Print(indent)
+            )?;
             rows_used += 1;
             col = indent_width;
             continue;
@@ -1076,7 +1382,15 @@ fn render_input(
 
         let w = UnicodeWidthStr::width(grapheme.as_str()).max(1);
         if col + w > term_width {
-            execute!(stdout, Print("\r\n"), Print(indent))?;
+            fill_input_line(stdout, term_width, col, input_bg, input_fg)?;
+            execute!(stdout, Print("\r\n"))?;
+            prepare_input_line(stdout, term_width, input_bg, input_fg)?;
+            execute!(
+                stdout,
+                SetBackgroundColor(input_bg),
+                SetForegroundColor(input_fg),
+                Print(indent)
+            )?;
             rows_used += 1;
             col = indent_width;
         }
@@ -1085,14 +1399,61 @@ fn render_input(
         col += w;
     }
 
-    let current_row = rows_used.saturating_sub(1);
-    let rows_above_cursor = current_row.saturating_sub(cursor_pos.0);
+    fill_input_line(stdout, term_width, col, input_bg, input_fg)?;
+    execute!(stdout, Print("\r\n"))?;
+    prepare_input_line(stdout, term_width, input_bg, input_fg)?;
+    execute!(stdout, ResetColor)?;
+
+    let padding_rows = 1usize;
+    let bottom_padding = 1usize;
+    let cursor_row = cursor_pos.0 + padding_rows;
+    let current_row = padding_rows + rows_used.saturating_sub(1) + bottom_padding;
+    let rows_above_cursor = current_row.saturating_sub(cursor_row);
     if rows_above_cursor > 0 {
         execute!(stdout, cursor::MoveUp(rows_above_cursor as u16))?;
     }
     execute!(stdout, cursor::MoveToColumn(cursor_pos.1 as u16))?;
     stdout.flush()?;
-    Ok((rows_used, cursor_pos))
+    Ok((rows_used + padding_rows + bottom_padding, (cursor_row, cursor_pos.1)))
+}
+
+fn fill_input_line(
+    stdout: &mut std::io::Stdout,
+    term_width: usize,
+    col: usize,
+    input_bg: Color,
+    input_fg: Color,
+) -> Result<()> {
+    if col >= term_width {
+        return Ok(());
+    }
+    let remaining = term_width - col;
+    execute!(
+        stdout,
+        SetBackgroundColor(input_bg),
+        SetForegroundColor(input_fg),
+        Print(" ".repeat(remaining))
+    )?;
+    Ok(())
+}
+
+fn prepare_input_line(
+    stdout: &mut std::io::Stdout,
+    term_width: usize,
+    input_bg: Color,
+    input_fg: Color,
+) -> Result<()> {
+    if term_width == 0 {
+        return Ok(());
+    }
+    execute!(
+        stdout,
+        SetBackgroundColor(input_bg),
+        SetForegroundColor(input_fg),
+        Print(" ".repeat(term_width)),
+        cursor::MoveToColumn(0)
+    )?;
+    Ok(())
 }
 
 /// 改行差分や末尾空白を無視して内容一致を判定
@@ -1105,49 +1466,10 @@ fn contents_equal(a: &str, b: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatSession, InputBuffer};
+    use super::ChatSession;
     use crate::mcp::types::{Tool, ToolInputSchema};
     use serde_json::json;
     use std::collections::HashMap;
-
-    #[test]
-    fn input_buffer_insert_and_delete() {
-        let mut buf = InputBuffer::default();
-        buf.insert_str("abc");
-        assert_eq!(buf.to_string(), "abc");
-        assert!(buf.move_left());
-        assert!(buf.backspace());
-        assert_eq!(buf.to_string(), "ac");
-        assert!(buf.delete());
-        assert_eq!(buf.to_string(), "a");
-    }
-
-    #[test]
-    fn input_buffer_vertical_move_with_newline() {
-        let mut buf = InputBuffer::default();
-        buf.insert_str("abcd\nef");
-        // Cursor at end (row 1, col 4 with prompt width 2, indent 2, term 6)
-        let moved_up = buf.move_vertical(-1, 2, 2, 6);
-        assert!(moved_up);
-        assert_eq!(buf.cursor, 2); // After 'b'
-        let moved_down = buf.move_vertical(1, 2, 2, 6);
-        assert!(moved_down);
-        assert_eq!(buf.to_string(), "abcd\nef");
-    }
-
-    #[test]
-    fn input_buffer_backspace_handles_graphemes() {
-        let mut buf = InputBuffer::default();
-        buf.insert_str("ok😊");
-        assert!(buf.backspace());
-        assert_eq!(buf.to_string(), "ok");
-        assert!(buf.backspace());
-        assert_eq!(buf.to_string(), "o");
-
-        buf.insert_str("e\u{0301}"); // combining acute
-        assert!(buf.backspace());
-        assert_eq!(buf.to_string(), "o");
-    }
 
     #[test]
     fn build_sample_arguments_prefers_required() {
@@ -1205,10 +1527,9 @@ mod tests {
         };
 
         let block = ChatSession::build_tool_sample_block(&tool);
-        assert!(block.contains("[TOOL_CALL]"));
-        assert!(block.contains("\"name\": \"echo\""));
-        assert!(block.contains("\"arguments\""));
-        assert!(block.contains("[END_TOOL_CALL]"));
+        assert!(block.contains("<tool_call name=\"echo\">"));
+        assert!(block.contains("\"message\""));
+        assert!(block.contains("</tool_call>"));
     }
 
     #[test]

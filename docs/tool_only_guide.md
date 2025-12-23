@@ -27,18 +27,15 @@
 
 ## LLM への指示テンプレ
 
-ツール呼び出しは `[TOOL_CALL] ... [END_TOOL_CALL]` 形式で記述します。例:
+ツール呼び出しは `<tool_call name="..."> ... </tool_call>` 形式で記述します。例:
 
 ```
-[TOOL_CALL]
+<tool_call name="write_file">
 {
-  "name": "write_file",
-  "arguments": {
-    "path": "README-ja.md",
-    "content": "翻訳内容 ..."
-  }
+  "path": "README-ja.md",
+  "content": "翻訳内容 ..."
 }
-[END_TOOL_CALL]
+</tool_call>
 ```
 
 ## ベストプラクティス

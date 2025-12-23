@@ -4,13 +4,13 @@ use libc::{c_int, c_void};
 use std::ffi::{CStr, CString};
 use std::time::Duration;
 use std::ptr;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::env;
 
 // Gemma chat template
 const GEMMA_TEMPLATE: &str = "<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n";
 // Qwen chat template
-const QWEN_TEMPLATE: &str = "<|im_start|>system\nあなたは真面目だけど少しお茶目で優秀なAIです。正確な情報を提供します。必ず日本語で答えてください。<|im_end|><|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n";
+const QWEN_TEMPLATE: &str = "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n";
 
 #[derive(Clone, Copy, Debug)]
 pub enum ChatTemplate {
@@ -82,14 +82,16 @@ struct CallbackContext {
     output_buffer: Vec<u8>,
     is_finished: bool,
     has_error: bool,
+    sender: Option<mpsc::Sender<String>>,
 }
 
 impl CallbackContext {
-    fn new() -> Self {
+    fn new(sender: Option<mpsc::Sender<String>>) -> Self {
         Self {
             output_buffer: Vec::new(),
             is_finished: false,
             has_error: false,
+            sender,
         }
     }
 }
@@ -100,9 +102,9 @@ struct CallbackState {
 }
 
 impl CallbackState {
-    fn new() -> Self {
+    fn new(sender: Option<mpsc::Sender<String>>) -> Self {
         Self {
-            context: Mutex::new(CallbackContext::new()),
+            context: Mutex::new(CallbackContext::new(sender)),
             notify: Condvar::new(),
         }
     }
@@ -168,9 +170,9 @@ impl RKLLM {
         })
     }
 
-    pub fn run<F>(&self, prompt: &str, mut _callback: F) -> Result<String>
+    pub fn run<F>(&self, prompt: &str, mut callback: F) -> Result<String>
     where
-        F: FnMut(&str),
+        F: FnMut(&str) + Send + 'static,
     {
         // Apply chat template
         let formatted_prompt = self.template.apply(prompt);
@@ -178,7 +180,13 @@ impl RKLLM {
             CString::new(formatted_prompt).context("Failed to create CString for prompt")?;
         let role_cstring = CString::new("user").context("Failed to create CString for role")?;
 
-        let shared_state = Arc::new(CallbackState::new());
+        let (sender, receiver) = mpsc::channel::<String>();
+        let callback_handle = std::thread::spawn(move || {
+            while let Ok(chunk) = receiver.recv() {
+                callback(&chunk);
+            }
+        });
+        let shared_state = Arc::new(CallbackState::new(Some(sender)));
         let callback_state_ptr =
             Arc::into_raw(Arc::clone(&shared_state)) as *mut c_void;
 
@@ -216,7 +224,9 @@ impl RKLLM {
             }
             let elapsed = start_time.elapsed();
             if elapsed >= timeout {
-                eprintln!("\n[Timeout waiting for response]");
+                if !is_tui_enabled() {
+                    eprintln!("\n[Timeout waiting for response]");
+                }
                 timed_out = true;
                 break;
             }
@@ -248,10 +258,12 @@ impl RKLLM {
                     let _ = Arc::from_raw(callback_state_ptr as *const CallbackState);
                 }
             });
+            let _ = callback_handle;
         } else {
             unsafe {
                 let _ = Arc::from_raw(callback_state_ptr as *const CallbackState);
             }
+            let _ = callback_handle.join();
         }
 
         if ret != 0 {
@@ -319,23 +331,35 @@ unsafe fn callback_impl(
     let mut context = match shared_state.context.lock() {
         Ok(ctx) => ctx,
         Err(poisoned) => {
-            eprintln!("[WARNING] Mutex was poisoned, recovering...");
+            if !is_tui_enabled() {
+                eprintln!("[WARNING] Mutex was poisoned, recovering...");
+            }
             poisoned.into_inner()
         }
     };
 
     match state {
         LLMCallState::RkllmRunFinish => {
+            let had_sender = context.sender.is_some();
             context.is_finished = true;
+            context.sender.take();
             shared_state.notify.notify_all();
-            print!("\n");
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
+            if !had_sender {
+                print!("\n");
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            }
         }
         LLMCallState::RkllmRunError => {
+            let had_sender = context.sender.is_some();
             context.has_error = true;
+            context.sender.take();
             shared_state.notify.notify_all();
-            eprintln!("\nError occurred during inference");
+            if !had_sender {
+                    if !is_tui_enabled() {
+                        eprintln!("\nError occurred during inference");
+                    }
+            }
         }
         LLMCallState::RkllmRunNormal => {
             if result.is_null() {
@@ -355,7 +379,9 @@ unsafe fn callback_impl(
                     process_text_chunk(&mut context, text);
                 }
                 Err(e) => {
-                    eprintln!("[DEBUG] UTF-8 decode error: {:?}", e);
+                    if !is_tui_enabled() {
+                        eprintln!("[DEBUG] UTF-8 decode error: {:?}", e);
+                    }
                 }
             }
         }
@@ -365,14 +391,21 @@ unsafe fn callback_impl(
     0  // Return 0 on success
 }
 
+fn is_tui_enabled() -> bool {
+    env::var("RKLLM_TUI").ok().as_deref() == Some("1")
+}
+
 /// Process a chunk of text - simply buffer and print it
 fn process_text_chunk(context: &mut CallbackContext, text: &str) {
-    use std::io::Write;
-
     // Buffer the output
     context.output_buffer.extend_from_slice(text.as_bytes());
 
-    // Print the text immediately
-    print!("{}", text);
-    let _ = std::io::stdout().flush();
+    if let Some(sender) = &context.sender {
+        let _ = sender.send(text.to_string());
+    } else {
+        // Legacy behavior: Print directly
+        use std::io::Write;
+        print!("{}", text);
+        let _ = std::io::stdout().flush();
+    }
 }

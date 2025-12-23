@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::env;
 
 use super::config::{McpConfig, ServerConfig, Transport};
 use super::transport::StdioTransport;
@@ -56,10 +57,12 @@ impl ServerConnection {
 
         // Validate protocol version
         if init_result.protocol_version != PROTOCOL_VERSION {
-            eprintln!(
-                "[MCP: {}] Warning: Server uses protocol version {}, we use {}",
-                config.name, init_result.protocol_version, PROTOCOL_VERSION
-            );
+            if !is_tui_enabled() {
+                eprintln!(
+                    "[MCP: {}] Warning: Server uses protocol version {}, we use {}",
+                    config.name, init_result.protocol_version, PROTOCOL_VERSION
+                );
+            }
         }
 
         // Send initialized notification
@@ -68,10 +71,12 @@ impl ServerConnection {
             .await
             .context("Failed to send initialized notification")?;
 
-        println!(
-            "[MCP: Connected to '{}' ({} v{})]",
-            config.name, init_result.server_info.name, init_result.server_info.version
-        );
+        if !is_tui_enabled() {
+            println!(
+                "[MCP: Connected to '{}' ({} v{})]",
+                config.name, init_result.server_info.name, init_result.server_info.version
+            );
+        }
 
         let mut connection = Self {
             name: config.name.clone(),
@@ -112,26 +117,30 @@ impl ServerConnection {
         self.available_tools = list_result.tools;
 
         if !self.available_tools.is_empty() {
-            println!(
-                "[MCP: Server '{}' provides {} tool(s)]",
-                self.name,
-                self.available_tools.len()
-            );
-            for tool in &self.available_tools {
-                let description = tool
-                    .description
-                    .as_deref()
-                    .unwrap_or("(no description)");
-                println!("  - {}: {}", tool.name, description);
+            if !is_tui_enabled() {
+                println!(
+                    "[MCP: Server '{}' provides {} tool(s)]",
+                    self.name,
+                    self.available_tools.len()
+                );
+                for tool in &self.available_tools {
+                    let description = tool
+                        .description
+                        .as_deref()
+                        .unwrap_or("(no description)");
+                    println!("  - {}: {}", tool.name, description);
+                }
             }
         }
 
         // Handle pagination if needed (nextCursor)
         if let Some(cursor) = list_result.next_cursor {
-            eprintln!(
-                "[MCP: {}] Warning: Server returned pagination cursor, but pagination is not yet implemented. Cursor: {}",
-                self.name, cursor
-            );
+            if !is_tui_enabled() {
+                eprintln!(
+                    "[MCP: {}] Warning: Server returned pagination cursor, but pagination is not yet implemented. Cursor: {}",
+                    self.name, cursor
+                );
+            }
         }
 
         Ok(())
@@ -190,16 +199,22 @@ impl McpClient {
                     servers.insert(name, connection);
                 }
                 Err(e) => {
-                    eprintln!("[MCP: Failed to connect to server '{}': {}]", name, e);
+                    if !is_tui_enabled() {
+                        eprintln!("[MCP: Failed to connect to server '{}': {}]", name, e);
+                    }
                     // Continue with other servers
                 }
             }
         }
 
         if servers.is_empty() {
-            println!("[MCP: No servers connected]");
+            if !is_tui_enabled() {
+                println!("[MCP: No servers connected]");
+            }
         } else {
-            println!("[MCP: Successfully connected to {} server(s)]", servers.len());
+            if !is_tui_enabled() {
+                println!("[MCP: Successfully connected to {} server(s)]", servers.len());
+            }
         }
 
         Ok(Self { servers })
@@ -239,7 +254,9 @@ impl McpClient {
             .find_server_for_tool(name)
             .ok_or_else(|| anyhow::anyhow!("Tool '{}' not found on any connected server", name))?;
 
-        println!("[MCP: Calling tool '{}' on server '{}']", name, connection.name);
+        if !is_tui_enabled() {
+            println!("[MCP: Calling tool '{}' on server '{}']", name, connection.name);
+        }
 
         // Call the tool
         let result = connection
@@ -253,14 +270,22 @@ impl McpClient {
 
         // Log result
         if tool_result.success {
-            println!("[MCP: Tool '{}' completed successfully]", name);
+            if !is_tui_enabled() {
+                println!("[MCP: Tool '{}' completed successfully]", name);
+            }
         } else {
-            println!("[MCP: Tool '{}' returned an error]", name);
+            if !is_tui_enabled() {
+                println!("[MCP: Tool '{}' returned an error]", name);
+            }
         }
 
         Ok(tool_result)
     }
 
+}
+
+fn is_tui_enabled() -> bool {
+    env::var("RKLLM_TUI").ok().as_deref() == Some("1")
 }
 
 #[cfg(test)]

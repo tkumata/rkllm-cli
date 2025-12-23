@@ -1,13 +1,21 @@
 use crate::file_ops::FileContent;
+use crate::mcp::types::ToolResult;
 
 /// システム向けの基本方針
 const SYSTEM_INSTRUCTIONS: &str = r#"
 You are a helpful coding assistant running on a local CLI. Always reply in Japanese.
 The <files> section is read-only context. Do NOT echo it back. Only create or modify files the user explicitly asked for.
 When the user asks for translation/summarization/rewriting, transform the content accordingly. Do NOT copy the input verbatim unless explicitly instructed.
+If <files> is provided, you MUST base your answer on it and MUST NOT ignore it.
+For translation requests, output only the translated text in the target language and never include the original text.
 If output targets are provided, write results to those paths and do not overwrite the source file unless the user says so.
 Use available MCP tools for environment actions (e.g., listing files) instead of fabricating content when tools are provided.
 If the user does NOT explicitly ask to create/modify/save files, respond normally and NEVER use <file>...</file> blocks.
+If <tool_results> is provided, use it as authoritative context and do not request the same tool again.
+Never call a tool more than once for the same request; when tool results are available, answer directly.
+For local file access, use tool calls in this format:
+<tool_call name="read_file">{"path":"path/to/file.txt"}</tool_call>
+<tool_call name="write_file">{"path":"path/to/file.txt","content":"..."}</tool_call>
 "#;
 
 /// ファイル操作の指示（システムプロンプトの補足）
@@ -16,6 +24,7 @@ const FILE_OPERATION_INSTRUCTIONS: &str = r#"
 
 IMPORTANT: Only use this file creation feature when the user EXPLICITLY requests to create, write, or save files.
 Do NOT create example files unless specifically asked.
+When creating <file> outputs for translation/summarization/proofreading, the content MUST be the transformed result, not the original input.
 
 When the user explicitly asks you to create or modify files, use the following format:
 
@@ -54,6 +63,7 @@ pub fn build_prompt(user_input: &str, files: &[FileContent], errors: &[(String, 
         &[],
         has_file_operation_intent(user_input),
         true,
+        &[],
     )
 }
 
@@ -69,6 +79,7 @@ pub fn build_simple_prompt(user_input: &str) -> String {
         &[],
         has_file_operation_intent(user_input),
         true,
+        &[],
     )
 }
 
@@ -86,6 +97,7 @@ pub fn build_chat_prompt(
     output_targets: &[String],
     has_file_op_intent: bool,
     file_writes_enabled: bool,
+    tool_results: &[ToolResult],
 ) -> String {
     let mut prompt = String::new();
 
@@ -138,6 +150,18 @@ pub fn build_chat_prompt(
             prompt.push_str(&format!("<target>{}</target>\n", target));
         }
         prompt.push_str("</output_targets>\n\n");
+    }
+
+    if !tool_results.is_empty() {
+        prompt.push_str("<tool_results>\n");
+        for result in tool_results {
+            let success = if result.success { "true" } else { "false" };
+            prompt.push_str(&format!(
+                "<tool_result name=\"{}\" success=\"{}\">\n{}\n</tool_result>\n\n",
+                result.name, success, result.output
+            ));
+        }
+        prompt.push_str("</tool_results>\n\n");
     }
 
     // user input
@@ -270,6 +294,7 @@ mod tests {
             &["b.txt".to_string()],
             true,
             true,
+            &[],
         );
         assert!(prompt.contains("<output_targets>"));
         assert!(prompt.contains("<target>b.txt</target>"));
@@ -285,6 +310,7 @@ mod tests {
             &["test.txt".to_string()],
             true,
             false,
+            &[],
         );
 
         assert!(prompt.contains("Tool-only Mode"));
