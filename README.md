@@ -61,6 +61,8 @@ The Rock5B's NPU delivers only 6 TOPS, so please don't expect too much.
 ┌────────┴────────────┐┌─────────┴───────────┐
 │ MCU + Sensor1 (C++) ││ MCU + Sensor2 (C++) │
 └─────────────────────┘└─────────────────────┘
+  Nano ESP32-S3          Nano ESP32-S3
+  BME280                 HMMD mmWave
 ```
 
 ## Features
