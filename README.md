@@ -17,6 +17,47 @@ I couldn't understand why Rockchip's samples use the adb command. That's why I c
 
 The Rock5B's NPU delivers only 6 TOPS, so please don't expect too much.
 
+## Architecture
+
+```text
+      ┌──────┐
+      │ User │
+      └──┬───┘
+┌────────│─────────────────────────── Rock5B ─┐
+│        ▼                                    │
+│ ┌──────────────┐    ┌───────────────┐       │
+│ │ Agentic CLI  ├───▶︎│ librkllmrt.so │       │
+│ │ & MCP Client │    └┬──────────────┘       │
+│ │ (Rust)       │     │  ┌───────────┐       │
+│ └──────────────┘     └─▶︎│ LLM Model │       │
+│        │                └───────────┘       │
+│        ├─────────────┬─────────────┐        │
+│        ▼             ▼             ▼        │
+│ ┌────────────┐┌─────────────┐┌────────────┐ │
+│ │ MCP Server ││ MCP Server  ││ MCP Server │ │
+│ ├────────────┤├─────────────┤├────────────┤ │
+│ │ DB Adapter ││ filesystem  ││ ripgrep    │ │
+│ │ (Rust)     ││ (npx)       ││ (npx)      │ │
+│ └──────┬─────┘└─────────────┘└────────────┘ │
+│        ▼                                    │
+│ ┌─────────────────────────────────────────┐ │
+│ │ SQLite3                                 │ │
+│ ├────────────────────┬────────────────────┤ │
+│ │ Sensor1 Data       │ Sensor2 Data       │ │
+│ └────────────────────┴────────────────────┘ │
+│        ▲                        ▲           │
+│ ┌──────┴────────────────────────┴─────────┐ │
+│ │ REST API as a Edge Server (Rust)        │ │
+│ │   /api/climate/save                     │ │
+│ │   /api/hmmd/save                        │ │
+│ └─────────────────────────────────────────┘ │
+│        ▲                        ▲           │
+└────────│────────────────────────│───────────┘
+┌────────┴────────────┐ ┌─────────┴───────────┐
+│ MCU + Sensor1 (C++) │ │ MCU + Sensor2 (C++) │
+└─────────────────────┘ └─────────────────────┘
+```
+
 ## Features
 
 - **Interactive Chat**: Command-line chat interface with streaming output and multiline editing (arrow keys for cursor movement, insert at cursor, Shift+Enter for newline)
