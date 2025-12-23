@@ -6,56 +6,61 @@ Rust implementation of a CLI tool for chatting with LLM models on Rockchip NPU u
 
 This project provides a command-line interface to interact with Large Language Models (LLMs) running on Rockchip NPU hardware (rk3588, rk3576). It uses Rust FFI bindings to communicate with the native `librkllmrt.so` library.
 
-I couldn't understand why Rockchip's samples use the adb command. That's why I created this program. I want to use the NPU on rock5B.
+I couldn't understand why Rockchip's samples use the `adb` command. That's why I created this program. I just want to use the NPU on the Rock5B by itself.
 
-| Model      | Token Per Second | Notes                             |
-| ---------- | ---------------- | --------------------------------- |
-| Qwen3 1.7B | 11.9             | Fast but accuracy is poor         |
-| Qwen3 4B   | 2.9              | Too slow                          |
-| Gemma3 1B  | 12               | Fast but MCP client does not work |
-| Gemma3 4B  | 2.9              | Too slow                          |
+| Model                  | Token Per Second | Notes                                                |
+| ---------------------- | ---------------- | ---------------------------------------------------- |
+| Qwen3 1.7B             | 11.9             | Fast but accuracy is poor                            |
+| Qwen3 4B               | 2.9              | The accuracy improves slightly, but it is very slow. |
+| Gemma3 1B              | 12               | Fast but MCP client does not work                    |
+| Gemma3 4B              | 2.9              | The accuracy improves slightly, but it is very slow. |
+| DeepSeek R1 Distill 7B | ---              | Not work. LLM responces "Alright. ppppppppppppp...." |
 
-The Rock5B's NPU delivers only 6 TOPS, so please don't expect too much.
+DeepSeek R1 Distill 7B does not run because of this program.
 
 ## Architecture
+
+This repository contains the "Agentic CLI & MCP Client (Rust)" based on the architecture described below. Other repositories (written in Rust and C++) will be released in the future.
+
+The Rock5B's NPU delivers only 6 TOPS, so please don't expect too much.
 
 ```text
       ┌──────┐
       │ User │
       └──┬───┘
-┌────────│─────────────────────────── Rock5B ─┐
-│        ▼                                    │
-│ ┌──────────────┐    ┌───────────────┐       │
-│ │ Agentic CLI  ├───▶︎│ librkllmrt.so │       │
-│ │ & MCP Client │    └┬──────────────┘       │
-│ │ (Rust)       │     │  ┌───────────┐       │
-│ └──────────────┘     └─▶︎│ LLM Model │       │
-│        │                └───────────┘       │
-│        ├─────────────┬─────────────┐        │
-│        ▼             ▼             ▼        │
-│ ┌────────────┐┌─────────────┐┌────────────┐ │
-│ │ MCP Server ││ MCP Server  ││ MCP Server │ │
-│ ├────────────┤├─────────────┤├────────────┤ │
-│ │ DB Adapter ││ filesystem  ││ ripgrep    │ │
-│ │ (Rust)     ││ (npx)       ││ (npx)      │ │
-│ └──────┬─────┘└─────────────┘└────────────┘ │
-│        ▼                                    │
-│ ┌─────────────────────────────────────────┐ │
-│ │ SQLite3                                 │ │
-│ ├────────────────────┬────────────────────┤ │
-│ │ Sensor1 Data       │ Sensor2 Data       │ │
-│ └────────────────────┴────────────────────┘ │
-│        ▲                        ▲           │
-│ ┌──────┴────────────────────────┴─────────┐ │
-│ │ REST API as a Edge Server (Rust)        │ │
-│ │   /api/climate/save                     │ │
-│ │   /api/hmmd/save                        │ │
-│ └─────────────────────────────────────────┘ │
-│        ▲                        ▲           │
-└────────│────────────────────────│───────────┘
-┌────────┴────────────┐ ┌─────────┴───────────┐
-│ MCU + Sensor1 (C++) │ │ MCU + Sensor2 (C++) │
-└─────────────────────┘ └─────────────────────┘
+┌────────│────────────────────────── Rock5B ─┐
+│        ▼                                   │
+│ ┌──────────────┐    ┌───────────────┐      │
+│ │ Agentic CLI  │◀︎──▶︎│ librkllmrt.so │      │
+│ │ & MCP Client │    └┬──────────────┘      │
+│ │ (Rust)       │     │  ┌───────────┐      │
+│ └──────────────┘     └─▶︎│ LLM Model │      │
+│        │                └───────────┘      │
+│        ├─────────────┬─────────────┐       │
+│        ▼             ▼             ▼       │
+│ ┌────────────┐┌────────────┐┌────────────┐ │
+│ │ MCP Server ││ MCP Server ││ MCP Server │ │
+│ ├────────────┤├────────────┤├────────────┤ │
+│ │ DB Adapter ││ filesystem ││ ripgrep    │ │
+│ │ (Rust)     ││ (npx)      ││ (npx)      │ │
+│ └──────┬─────┘└────────────┘└────────────┘ │
+│        ▼                                   │
+│ ┌────────────────────────────────────────┐ │
+│ │ SQLite3                                │ │
+│ ├────────────────────┬───────────────────┤ │
+│ │ Sensor1 Data       │ Sensor2 Data      │ │
+│ └────────────────────┴───────────────────┘ │
+│        ▲                       ▲           │
+│ ┌──────┴───────────────────────┴─────────┐ │
+│ │ REST API as a Edge Server (Rust)       │ │
+│ │   /api/climate/save                    │ │
+│ │   /api/hmmd/save                       │ │
+│ └────────────────────────────────────────┘ │
+│        ▲                       ▲           │
+└────────│───────────────────────│───────────┘
+┌────────┴────────────┐┌─────────┴───────────┐
+│ MCU + Sensor1 (C++) ││ MCU + Sensor2 (C++) │
+└─────────────────────┘└─────────────────────┘
 ```
 
 ## Features
