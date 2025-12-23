@@ -35,6 +35,7 @@ pub struct ChatSession {
     confirm_writes: bool,
     tool_only: bool,
     config: AppConfig,
+    execution_dir: String,
 }
 
 #[derive(Copy, Clone)]
@@ -229,6 +230,11 @@ impl ChatSession {
             None
         };
 
+        let execution_dir = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .to_string_lossy()
+            .to_string();
+
         let session = Self {
             rkllm,
             mcp_client,
@@ -238,6 +244,7 @@ impl ChatSession {
             confirm_writes,
             tool_only,
             config: AppConfig::load(),
+            execution_dir,
         };
 
         if session.tool_only && session.mcp_client.is_none() {
@@ -674,13 +681,13 @@ impl ChatSession {
         let mut stdout = stdout();
         let lines = [
             [
-                ("██████ ", Color::Red),
+                ("██████ ", Color::Red),    // R
                 (" ", Color::Reset),
-                ("██  ██", Color::Yellow),
+                ("██  ██", Color::Yellow),  // K
                 ("  ", Color::Reset),
-                ("██      ", Color::Green),
-                ("██      ", Color::Green),
-                ("██   ██", Color::Cyan),
+                ("██      ", Color::Green), // L
+                ("██      ", Color::Green), // L
+                ("██   ██", Color::Cyan),   // M
             ],
             [
                 ("██   ██", Color::Red),
@@ -718,6 +725,15 @@ impl ChatSession {
                 ("███████ ", Color::Green),
                 ("██   ██", Color::Cyan),
             ],
+            [
+                ("░░   ░░", Color::Red),
+                (" ", Color::Reset),
+                ("░░  ░░", Color::Yellow),
+                ("  ", Color::Reset),
+                ("░░░░░░░ ", Color::Green),
+                ("░░░░░░░ ", Color::Green),
+                ("░░   ░░", Color::Cyan),
+            ],
         ];
 
         for line in &lines {
@@ -738,7 +754,10 @@ impl ChatSession {
     fn print_status_line(&self, stdout: &mut std::io::Stdout, status: &str) -> Result<()> {
         let mcp = if self.mcp_client.is_some() { "on" } else { "off" };
         let mode = if self.tool_only { "tool-only" } else { "chat" };
-        let line = format!("[Status: {} | MCP: {} | Mode: {}]", status, mcp, mode);
+        let line = format!(
+            "[Dir: {} | Status: {} | MCP: {} | Mode: {}]",
+            self.execution_dir, status, mcp, mode
+        );
         execute!(
             stdout,
             ResetColor,
