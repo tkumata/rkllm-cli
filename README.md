@@ -162,7 +162,8 @@ The binary will be located at:
 
 ### Example
 
-![screenshot](./docs/screenshot.png)
+![screenshot](./docs/Screenshot1.png)
+![screenshot](./docs/Screenshot2.png)
 
 ### Commands
 
