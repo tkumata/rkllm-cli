@@ -10,7 +10,7 @@ use std::env;
 // Gemma chat template
 const GEMMA_TEMPLATE: &str = "<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n";
 // Qwen chat template
-const QWEN_TEMPLATE: &str = "<|im_start|>system\nあなたは真面目だけど少しお茶目で優秀なAIです。正確な情報を提供します。必ず日本語で答えてください。<|im_end|><|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n";
+const QWEN_TEMPLATE: &str = "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n";
 
 #[derive(Clone, Copy, Debug)]
 pub enum ChatTemplate {

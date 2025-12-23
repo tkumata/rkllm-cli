@@ -4,8 +4,8 @@ use crate::file_ops;
 use crate::file_output_parser;
 use crate::llm::{RKLLMConfig, RKLLM};
 use crate::mcp::{McpClient, McpConfig};
-use crate::mcp::types::Tool;
-use crate::intent::{has_file_operation_intent, prefers_output_only};
+use crate::mcp::types::{Tool, ToolCall, ToolResult};
+use crate::intent::{has_file_operation_intent, has_file_read_intent, prefers_output_only};
 use crate::prompt_builder::build_chat_prompt;
 use crate::tool_detector::ToolCallDetector;
 use anyhow::{Context, Result};
@@ -16,6 +16,7 @@ use crossterm::{
     style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
     terminal,
 };
+use regex::Regex;
 use serde_json::{self, json};
 use std::collections::HashSet;
 use std::io::{self, stdout, Write};
@@ -34,6 +35,12 @@ pub struct ChatSession {
     confirm_writes: bool,
     tool_only: bool,
     config: AppConfig,
+}
+
+#[derive(Copy, Clone)]
+enum ToolCallAllowance {
+    All,
+    WriteOnly,
 }
 
 #[derive(Default)]
@@ -279,12 +286,15 @@ impl ChatSession {
                 break;
             }
 
-            let has_file_op_intent = has_file_operation_intent(&trimmed);
-            if self.tool_only && has_file_op_intent {
+            let has_file_write_intent = has_file_operation_intent(&trimmed);
+            let has_file_read_intent = has_file_read_intent(&trimmed);
+            if self.tool_only && has_file_write_intent {
                 println!("\n[tool-only] Local file writes are disabled. Use MCP tools for any file outputs.");
             }
 
-            let file_paths = if has_file_op_intent && !self.config.detect_extensions.is_empty() {
+            let file_paths = if (has_file_write_intent || has_file_read_intent)
+                && !self.config.detect_extensions.is_empty()
+            {
                 file_detector::detect_file_paths_with_exts(&trimmed, &self.config.detect_extensions)
             } else {
                 Vec::new()
@@ -303,7 +313,7 @@ impl ChatSession {
                 let mut input_candidates = Vec::new();
                 let mut output_candidates = Vec::new();
 
-                if has_file_op_intent && file_paths.len() >= 2 {
+                if has_file_write_intent && file_paths.len() >= 2 {
                     let mut iter = file_paths.iter();
                     if let Some(first) = iter.next() {
                         input_candidates.push(first.clone());
@@ -311,7 +321,7 @@ impl ChatSession {
                     for p in iter {
                         output_candidates.push(p.clone());
                     }
-                } else if has_file_op_intent && prefers_output_only(&trimmed) {
+                } else if has_file_write_intent && prefers_output_only(&trimmed) {
                     output_candidates.extend(file_paths.clone());
                 } else {
                     input_candidates.extend(file_paths.clone());
@@ -358,8 +368,9 @@ impl ChatSession {
                 &errors,
                 tool_info.as_deref(),
                 &output_targets,
-                has_file_op_intent,
+                has_file_write_intent,
                 !self.tool_only,
+                &[],
             );
             if self.preview_prompt || std::env::var("RKLLM_DEBUG_PROMPT").is_ok() {
                 eprintln!("\n[DEBUG prompt length={}]", prompt.len());
@@ -373,33 +384,99 @@ impl ChatSession {
                 print!("{}", text);
                 let _ = io::stdout().flush();
             }) {
-                Ok(response) => {
+                Ok(mut response) => {
                     println!();
 
-                    // ファイル操作を処理（ユーザーに意図がある場合のみ）
-                    if has_file_op_intent {
-                        if self.tool_only {
-                            if let Err(e) = self
-                                .process_file_operations_via_tools(
-                                    &response,
-                                    &provided_files,
-                                    &output_targets,
-                                )
-                                .await
-                            {
-                                eprintln!("\nError processing file operations via MCP tools: {}", e);
+                    let mut tool_rounds = 0usize;
+                    let mut seen_tool_calls: HashSet<String> = HashSet::new();
+                    loop {
+                        // ファイル操作を処理（ユーザーに意図がある場合のみ）
+                        if has_file_write_intent {
+                            if self.tool_only {
+                                if let Err(e) = self
+                                    .process_file_operations_via_tools(
+                                        &response,
+                                        &provided_files,
+                                        &output_targets,
+                                    )
+                                    .await
+                                {
+                                    eprintln!("\nError processing file operations via MCP tools: {}", e);
+                                }
+                            } else if let Err(e) = self.process_file_operations(
+                                &response,
+                                &provided_files,
+                                &output_targets,
+                            ) {
+                                eprintln!("\nError processing file operations: {}", e);
                             }
-                        } else if let Err(e) =
-                            self.process_file_operations(&response, &provided_files, &output_targets)
-                        {
-                            eprintln!("\nError processing file operations: {}", e);
                         }
-                    }
 
-                    // MCP ツール呼び出しを処理
-                    if self.mcp_client.is_some() {
-                        if let Err(e) = self.process_tool_calls(&response).await {
-                            eprintln!("\nError processing tool calls: {}", e);
+                        let allowance = if tool_rounds == 0 {
+                            ToolCallAllowance::All
+                        } else {
+                            ToolCallAllowance::WriteOnly
+                        };
+                        let (tool_results, blocked_repeat) = match self
+                            .process_tool_calls(&response, &mut seen_tool_calls, allowance)
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(e) => {
+                                eprintln!("\nError processing tool calls: {}", e);
+                                (Vec::new(), false)
+                            }
+                            };
+                        if blocked_repeat {
+                            eprintln!("\n[Repeated tool call blocked]");
+                            break;
+                        }
+                        if tool_results.is_empty() {
+                            break;
+                        }
+
+                        tool_rounds += 1;
+                        if tool_rounds >= 3 {
+                            eprintln!("\n[Tool call limit reached]");
+                            break;
+                        }
+
+                        let followup_prompt = build_chat_prompt(
+                            &trimmed,
+                            &files,
+                            &errors,
+                            tool_info.as_deref(),
+                            &output_targets,
+                            has_file_write_intent,
+                            !self.tool_only,
+                            &tool_results,
+                        );
+                        if self.preview_prompt || std::env::var("RKLLM_DEBUG_PROMPT").is_ok() {
+                            eprintln!("\n[DEBUG prompt length={}]", followup_prompt.len());
+                            eprintln!("{}", followup_prompt);
+                        }
+
+                        let buffered = Arc::new(Mutex::new(String::new()));
+                        let buffered_ref = Arc::clone(&buffered);
+                        match self.rkllm.run(&followup_prompt, move |text| {
+                            if let Ok(mut buf) = buffered_ref.lock() {
+                                buf.push_str(text);
+                            }
+                        }) {
+                            Ok(next_response) => {
+                                let display = buffered
+                                    .lock()
+                                    .map(|buf| Self::strip_tool_calls(&buf))
+                                    .unwrap_or_default();
+                                print!("{}", display);
+                                let _ = io::stdout().flush();
+                                println!();
+                                response = next_response;
+                            }
+                            Err(e) => {
+                                eprintln!("\nError during inference: {}", e);
+                                break;
+                            }
                         }
                     }
                 }
@@ -687,15 +764,18 @@ impl ChatSession {
         print!("\r\n");
     }
 
+    fn strip_tool_calls(text: &str) -> String {
+        // Remove <tool_call ...>...</tool_call> blocks from display output.
+        let pattern = Regex::new(r#"(?s)<tool_call\s+name="[^"]+"\s*>.*?</tool_call>"#)
+            .unwrap();
+        pattern.replace_all(text, "").to_string()
+    }
+
     fn build_tool_sample_block(tool: &Tool) -> String {
         let sample_args = Self::build_sample_arguments(tool);
-        let sample_call = json!({
-            "name": tool.name.clone(),
-            "arguments": sample_args,
-        });
-        let pretty = serde_json::to_string_pretty(&sample_call).unwrap_or_else(|_| "{}".to_string());
+        let pretty = serde_json::to_string_pretty(&sample_args).unwrap_or_else(|_| "{}".to_string());
 
-        format!("[TOOL_CALL]\n{}\n[END_TOOL_CALL]\n", pretty)
+        format!("<tool_call name=\"{}\">\n{}\n</tool_call>\n", tool.name, pretty)
     }
 
     fn build_sample_arguments(tool: &Tool) -> serde_json::Value {
@@ -784,14 +864,11 @@ impl ChatSession {
         }
 
         info.push_str("\nTo use a tool, output (see per-tool samples above):\n\n");
-        info.push_str("[TOOL_CALL]\n");
+        info.push_str("<tool_call name=\"tool_name\">\n");
         info.push_str("{\n");
-        info.push_str("  \"name\": \"tool_name\",\n");
-        info.push_str("  \"arguments\": {\n");
-        info.push_str("    \"argument_name\": \"value\"\n");
-        info.push_str("  }\n");
+        info.push_str("  \"argument_name\": \"value\"\n");
         info.push_str("}\n");
-        info.push_str("[END_TOOL_CALL]\n");
+        info.push_str("</tool_call>\n");
 
         Some(info)
     }
@@ -1033,35 +1110,186 @@ impl ChatSession {
     ///
     /// # 引数
     /// * `output` - LLMの出力テキスト
-    async fn process_tool_calls(&self, output: &str) -> Result<()> {
+    async fn process_tool_calls(
+        &self,
+        output: &str,
+        seen_tool_calls: &mut HashSet<String>,
+        allowance: ToolCallAllowance,
+    ) -> Result<(Vec<ToolResult>, bool)> {
         let tool_calls = self.tool_detector.detect(output);
 
         if tool_calls.is_empty() {
-            return Ok(());
+            return Ok((Vec::new(), false));
         }
 
         println!("\n[Detected {} tool call(s)]", tool_calls.len());
 
-        if let Some(client) = &self.mcp_client {
-            for call in tool_calls {
-                match client.call_tool(&call.name, call.arguments).await {
-                    Ok(result) => {
-                        if result.success {
-                            println!("\n[Tool '{}' output:]", call.name);
-                            println!("{}", result.output);
-                        } else {
-                            eprintln!("\n[Tool '{}' failed:]", call.name);
-                            eprintln!("{}", result.output);
+        let mut results = Vec::new();
+        let mut blocked_repeat = false;
+
+        for call in tool_calls {
+            if matches!(allowance, ToolCallAllowance::WriteOnly) && call.name != "write_file" {
+                blocked_repeat = true;
+                continue;
+            }
+
+            if seen_tool_calls.contains(&call.name) {
+                blocked_repeat = true;
+                continue;
+            }
+            seen_tool_calls.insert(call.name.clone());
+
+            match call.name.as_str() {
+                "read_file" => {
+                    results.push(self.handle_read_file_tool_call(&call));
+                }
+                "write_file" => {
+                    results.push(self.handle_write_file_tool_call(&call)?);
+                }
+                _ => {
+                    if let Some(client) = &self.mcp_client {
+                        match client.call_tool(&call.name, call.arguments).await {
+                            Ok(mut result) => {
+                                result.name = call.name.clone();
+                                if result.success {
+                                    if result.output.trim().is_empty() {
+                                        println!("\n[Tool '{}' success with empty output]", call.name);
+                                    } else {
+                                        println!("\n[Tool '{}' output:]", call.name);
+                                        println!("{}", result.output);
+                                    }
+                                } else {
+                                    eprintln!("\n[Tool '{}' failed:]", call.name);
+                                    eprintln!("{}", result.output);
+                                }
+                                results.push(result);
+                            }
+                            Err(e) => {
+                                eprintln!("\n[Failed to call tool '{}': {}]", call.name, e);
+                                results.push(Self::tool_result_json(
+                                    &call.name,
+                                    false,
+                                    json!({"error": e.to_string()}),
+                                ));
+                            }
                         }
-                    }
-                    Err(e) => {
-                        eprintln!("\n[Failed to call tool '{}': {}]", call.name, e);
+                    } else {
+                        eprintln!("\n[Unknown tool '{}': no MCP client]", call.name);
+                        results.push(Self::tool_result_json(
+                            &call.name,
+                            false,
+                            json!({"error": "No MCP client available"}),
+                        ));
                     }
                 }
             }
         }
 
-        Ok(())
+        Ok((results, blocked_repeat))
+    }
+
+    fn handle_read_file_tool_call(&self, call: &ToolCall) -> ToolResult {
+        let path = call
+            .arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+
+        let Some(path) = path else {
+            return Self::tool_result_json(
+                "read_file",
+                false,
+                json!({"error": "Missing required argument: path"}),
+            );
+        };
+
+        match file_ops::read_file(&path) {
+            Ok(content) => Self::tool_result_json(
+                "read_file",
+                true,
+                json!({"path": content.original_path, "content": content.content}),
+            ),
+            Err(e) => Self::tool_result_json(
+                "read_file",
+                false,
+                json!({"path": path, "error": e.to_string()}),
+            ),
+        }
+    }
+
+    fn handle_write_file_tool_call(&self, call: &ToolCall) -> Result<ToolResult> {
+        if self.tool_only {
+            return Ok(Self::tool_result_json(
+                "write_file",
+                false,
+                json!({"error": "Local writes are disabled in tool-only mode"}),
+            ));
+        }
+
+        let path = call
+            .arguments
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+        let content = call
+            .arguments
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string());
+
+        let Some(path) = path else {
+            return Ok(Self::tool_result_json(
+                "write_file",
+                false,
+                json!({"error": "Missing required argument: path"}),
+            ));
+        };
+        let Some(content) = content else {
+            return Ok(Self::tool_result_json(
+                "write_file",
+                false,
+                json!({"error": "Missing required argument: content"}),
+            ));
+        };
+
+        let exists = file_ops::file_exists(&path);
+        if self.confirm_writes {
+            if !self.confirm_write(&path, exists)? {
+                return Ok(Self::tool_result_json(
+                    "write_file",
+                    false,
+                    json!({"path": path, "skipped": true}),
+                ));
+            }
+        } else if exists && !self.confirm_overwrite(&path)? {
+            return Ok(Self::tool_result_json(
+                "write_file",
+                false,
+                json!({"path": path, "skipped": true}),
+            ));
+        }
+
+        match file_ops::write_file(&path, &content, false) {
+            Ok(_) => Ok(Self::tool_result_json(
+                "write_file",
+                true,
+                json!({"path": path, "written": true}),
+            )),
+            Err(e) => Ok(Self::tool_result_json(
+                "write_file",
+                false,
+                json!({"path": path, "error": e.to_string()}),
+            )),
+        }
+    }
+
+    fn tool_result_json(name: &str, success: bool, payload: serde_json::Value) -> ToolResult {
+        let output = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string());
+        ToolResult {
+            name: name.to_string(),
+            success,
+            output,
+        }
     }
 
     /// MCPツールから書き込み用ツール名を推定する
@@ -1299,10 +1527,9 @@ mod tests {
         };
 
         let block = ChatSession::build_tool_sample_block(&tool);
-        assert!(block.contains("[TOOL_CALL]"));
-        assert!(block.contains("\"name\": \"echo\""));
-        assert!(block.contains("\"arguments\""));
-        assert!(block.contains("[END_TOOL_CALL]"));
+        assert!(block.contains("<tool_call name=\"echo\">"));
+        assert!(block.contains("\"message\""));
+        assert!(block.contains("</tool_call>"));
     }
 
     #[test]

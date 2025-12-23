@@ -72,7 +72,27 @@ impl ToolCallDetector {
 
         for cap in self.xml_pattern.captures_iter(text) {
             let name = cap[1].to_string();
-            let args_str = &cap[2];
+            let args_str = cap[2].trim();
+
+            if args_str.starts_with('{') {
+                if let Ok(value) = serde_json::from_str::<Value>(args_str) {
+                    if let Some(obj) = value.as_object() {
+                        if let Some(arguments) = obj.get("arguments").and_then(|v| v.as_object()) {
+                            calls.push(ToolCall {
+                                name,
+                                arguments: Value::Object(arguments.clone()),
+                            });
+                            continue;
+                        }
+
+                        calls.push(ToolCall {
+                            name,
+                            arguments: value,
+                        });
+                        continue;
+                    }
+                }
+            }
 
             // Simple XML argument parsing
             let mut args = serde_json::Map::new();
@@ -163,6 +183,25 @@ Here are the results.
         assert_eq!(
             calls[0].arguments.get("pattern").and_then(|v| v.as_str()),
             Some("*.rs")
+        );
+    }
+
+    #[test]
+    fn test_detect_xml_style_json_body() {
+        let detector = ToolCallDetector::new();
+
+        let text = r#"
+<tool_call name="read_file">
+{"path":"docs/readme.md"}
+</tool_call>
+"#;
+
+        let calls = detector.detect(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "read_file");
+        assert_eq!(
+            calls[0].arguments.get("path").and_then(|v| v.as_str()),
+            Some("docs/readme.md")
         );
     }
 
