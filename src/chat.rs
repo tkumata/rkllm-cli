@@ -681,13 +681,13 @@ impl ChatSession {
         let mut stdout = stdout();
         let lines = [
             [
-                ("██████ ", Color::Red),
+                ("██████ ", Color::Red),    // R
                 (" ", Color::Reset),
-                ("██  ██", Color::Yellow),
+                ("██  ██", Color::Yellow),  // K
                 ("  ", Color::Reset),
-                ("██      ", Color::Green),
-                ("██      ", Color::Green),
-                ("██   ██", Color::Cyan),
+                ("██      ", Color::Green), // L
+                ("██      ", Color::Green), // L
+                ("██   ██", Color::Cyan),   // M
             ],
             [
                 ("██   ██", Color::Red),
@@ -724,6 +724,15 @@ impl ChatSession {
                 ("███████ ", Color::Green),
                 ("███████ ", Color::Green),
                 ("██   ██", Color::Cyan),
+            ],
+            [
+                ("░░   ░░", Color::Red),
+                (" ", Color::Reset),
+                ("░░  ░░", Color::Yellow),
+                ("  ", Color::Reset),
+                ("░░░░░░░ ", Color::Green),
+                ("░░░░░░░ ", Color::Green),
+                ("░░   ░░", Color::Cyan),
             ],
         ];
 
