@@ -293,6 +293,16 @@ impl ChatSession {
                 break;
             }
 
+            if trimmed.eq_ignore_ascii_case("tools") {
+                self.show_tools_command(stdout)?;
+                continue;
+            }
+
+            if trimmed.eq_ignore_ascii_case("help") {
+                self.show_help_command(stdout)?;
+                continue;
+            }
+
             let has_file_write_intent = has_file_operation_intent(&trimmed);
             let has_file_read_intent = has_file_read_intent(&trimmed);
             if self.tool_only && has_file_write_intent {
@@ -768,6 +778,54 @@ impl ChatSession {
             ResetColor,
             Print("\r\n")
         )?;
+        Ok(())
+    }
+
+    fn show_tools_command(&self, stdout: &mut std::io::Stdout) -> Result<()> {
+        execute!(stdout, Print("\r\n"))?;
+        let Some(mcp_client) = &self.mcp_client else {
+            execute!(stdout, Print("[No MCP client configured]\r\n"))?;
+            return Ok(());
+        };
+        let tools = mcp_client.list_all_tools();
+        if tools.is_empty() {
+            execute!(stdout, Print("[No tools available]\r\n"))?;
+            return Ok(());
+        }
+
+        execute!(
+            stdout,
+            SetForegroundColor(Color::Cyan),
+            Print("Available Tools:\r\n"),
+            ResetColor
+        )?;
+        for (_server_name, tool) in &tools {
+            execute!(
+                stdout,
+                SetForegroundColor(Color::Yellow),
+                Print(format!("  {}\r\n", tool.name)),
+                ResetColor
+            )?;
+            if let Some(desc) = &tool.description {
+                execute!(stdout, Print(format!("    {}\r\n", desc)))?;
+            }
+        }
+        execute!(stdout, Print("\r\n"))?;
+        Ok(())
+    }
+
+    fn show_help_command(&self, stdout: &mut std::io::Stdout) -> Result<()> {
+        execute!(stdout, Print("\r\n"))?;
+        execute!(
+            stdout,
+            SetForegroundColor(Color::Cyan),
+            Print("Available Commands:\r\n"),
+            ResetColor
+        )?;
+        execute!(stdout, Print("  help   - Show this help message\r\n"))?;
+        execute!(stdout, Print("  tools  - List available MCP tools\r\n"))?;
+        execute!(stdout, Print("  quit   - Exit the application (also 'exit')\r\n"))?;
+        execute!(stdout, Print("\r\n"))?;
         Ok(())
     }
 
