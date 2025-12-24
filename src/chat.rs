@@ -290,19 +290,21 @@ impl ChatSession {
                 continue;
             }
 
-            if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit") {
-                execute!(stdout, Print("\r\nSee you!\r\n"))?;
-                break;
-            }
+            if let Some(command) = trimmed.strip_prefix('/') {
+                if command.eq_ignore_ascii_case("exit") || command.eq_ignore_ascii_case("quit") {
+                    execute!(stdout, Print("\r\nSee you!\r\n"))?;
+                    break;
+                }
 
-            if trimmed.eq_ignore_ascii_case("tools") {
-                self.show_tools_command(stdout)?;
-                continue;
-            }
+                if command.eq_ignore_ascii_case("tools") {
+                    self.show_tools_command(stdout)?;
+                    continue;
+                }
 
-            if trimmed.eq_ignore_ascii_case("help") {
-                self.show_help_command(stdout)?;
-                continue;
+                if command.eq_ignore_ascii_case("help") {
+                    self.show_help_command(stdout)?;
+                    continue;
+                }
             }
 
             let has_file_write_intent = has_file_operation_intent(&trimmed);
@@ -849,9 +851,9 @@ impl ChatSession {
             Print("Available Commands:\r\n"),
             ResetColor
         )?;
-        execute!(stdout, Print("  help   - Show this help message\r\n"))?;
-        execute!(stdout, Print("  tools  - List available MCP tools\r\n"))?;
-        execute!(stdout, Print("  quit   - Exit the application (also 'exit')\r\n"))?;
+        execute!(stdout, Print("  /help   - Show this help message\r\n"))?;
+        execute!(stdout, Print("  /tools  - List available MCP tools\r\n"))?;
+        execute!(stdout, Print("  /quit   - Exit the application (also '/exit')\r\n"))?;
         execute!(stdout, Print("\r\n"))?;
         Ok(())
     }
