@@ -16,9 +16,11 @@ use crossterm::{
     style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
     terminal,
 };
+use once_cell::sync::OnceCell;
 use regex::Regex;
 use serde_json::{self, json};
 use std::collections::HashSet;
+use std::cmp::Reverse;
 use std::io::{self, stdout, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -288,9 +290,21 @@ impl ChatSession {
                 continue;
             }
 
-            if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit") {
-                execute!(stdout, Print("\r\nSee you!\r\n"))?;
-                break;
+            if let Some(command) = trimmed.strip_prefix('/') {
+                if command.eq_ignore_ascii_case("exit") || command.eq_ignore_ascii_case("quit") {
+                    execute!(stdout, Print("\r\nSee you!\r\n"))?;
+                    break;
+                }
+
+                if command.eq_ignore_ascii_case("tools") {
+                    self.show_tools_command(stdout)?;
+                    continue;
+                }
+
+                if command.eq_ignore_ascii_case("help") {
+                    self.show_help_command(stdout)?;
+                    continue;
+                }
             }
 
             let has_file_write_intent = has_file_operation_intent(&trimmed);
@@ -368,8 +382,7 @@ impl ChatSession {
 
             let tool_info = self.build_tool_info();
 
-            // プロンプトを構築（system/user/context/tools の4段）
-            let prompt = build_chat_prompt(
+            let prompt_build = build_prompt_with_context_limit(
                 &trimmed,
                 &files,
                 &errors,
@@ -379,6 +392,19 @@ impl ChatSession {
                 !self.tool_only,
                 &[],
             );
+            for notice in &prompt_build.notices {
+                println!(
+                    "[Truncated file content: {} ({} -> {} tokens)]",
+                    notice.path, notice.original_tokens, notice.kept_tokens
+                );
+            }
+            if prompt_build.overflow {
+                eprintln!(
+                    "[Context] Prompt exceeds max context. Reduce input or set RKLLM_MAX_CONTEXT_TOKENS."
+                );
+                continue;
+            }
+            let prompt = prompt_build.prompt;
             if self.preview_prompt || std::env::var("RKLLM_DEBUG_PROMPT").is_ok() {
                 eprintln!("\n[DEBUG prompt length={}]", prompt.len());
                 eprintln!("{}", prompt);
@@ -448,7 +474,7 @@ impl ChatSession {
                             break;
                         }
 
-                        let followup_prompt = build_chat_prompt(
+                        let followup_build = build_prompt_with_context_limit(
                             &trimmed,
                             &files,
                             &errors,
@@ -458,6 +484,19 @@ impl ChatSession {
                             !self.tool_only,
                             &tool_results,
                         );
+                        for notice in &followup_build.notices {
+                            println!(
+                                "[Truncated file content: {} ({} -> {} tokens)]",
+                                notice.path, notice.original_tokens, notice.kept_tokens
+                            );
+                        }
+                        if followup_build.overflow {
+                            eprintln!(
+                                "[Context] Prompt exceeds max context. Reduce input or set RKLLM_MAX_CONTEXT_TOKENS."
+                            );
+                            break;
+                        }
+                        let followup_prompt = followup_build.prompt;
                         if self.preview_prompt || std::env::var("RKLLM_DEBUG_PROMPT").is_ok() {
                             eprintln!("\n[DEBUG prompt length={}]", followup_prompt.len());
                             eprintln!("{}", followup_prompt);
@@ -768,6 +807,54 @@ impl ChatSession {
             ResetColor,
             Print("\r\n")
         )?;
+        Ok(())
+    }
+
+    fn show_tools_command(&self, stdout: &mut std::io::Stdout) -> Result<()> {
+        execute!(stdout, Print("\r\n"))?;
+        let Some(mcp_client) = &self.mcp_client else {
+            execute!(stdout, Print("[No MCP client configured]\r\n"))?;
+            return Ok(());
+        };
+        let tools = mcp_client.list_all_tools();
+        if tools.is_empty() {
+            execute!(stdout, Print("[No tools available]\r\n"))?;
+            return Ok(());
+        }
+
+        execute!(
+            stdout,
+            SetForegroundColor(Color::Cyan),
+            Print("Available Tools:\r\n"),
+            ResetColor
+        )?;
+        for (_server_name, tool) in &tools {
+            execute!(
+                stdout,
+                SetForegroundColor(Color::Yellow),
+                Print(format!("  {}\r\n", tool.name)),
+                ResetColor
+            )?;
+            if let Some(desc) = &tool.description {
+                execute!(stdout, Print(format!("    {}\r\n", desc)))?;
+            }
+        }
+        execute!(stdout, Print("\r\n"))?;
+        Ok(())
+    }
+
+    fn show_help_command(&self, stdout: &mut std::io::Stdout) -> Result<()> {
+        execute!(stdout, Print("\r\n"))?;
+        execute!(
+            stdout,
+            SetForegroundColor(Color::Cyan),
+            Print("Available Commands:\r\n"),
+            ResetColor
+        )?;
+        execute!(stdout, Print("  /help   - Show this help message\r\n"))?;
+        execute!(stdout, Print("  /tools  - List available MCP tools\r\n"))?;
+        execute!(stdout, Print("  /quit   - Exit the application (also '/exit')\r\n"))?;
+        execute!(stdout, Print("\r\n"))?;
         Ok(())
     }
 
@@ -1481,6 +1568,257 @@ fn contents_equal(a: &str, b: &str) -> bool {
         s.replace("\r\n", "\n").trim_end().to_string()
     }
     normalize(a) == normalize(b)
+}
+
+struct TruncationNotice {
+    path: String,
+    original_tokens: usize,
+    kept_tokens: usize,
+}
+
+struct PromptWithLimit {
+    prompt: String,
+    notices: Vec<TruncationNotice>,
+    overflow: bool,
+}
+
+static MAX_CONTEXT_TOKENS: OnceCell<usize> = OnceCell::new();
+static CONTEXT_RESERVED_TOKENS: OnceCell<usize> = OnceCell::new();
+
+fn build_prompt_with_context_limit(
+    user_input: &str,
+    files: &[file_ops::FileContent],
+    errors: &[(String, String)],
+    tool_info: Option<&str>,
+    output_targets: &[String],
+    has_file_op_intent: bool,
+    file_writes_enabled: bool,
+    tool_results: &[ToolResult],
+) -> PromptWithLimit {
+    let max_tokens = max_context_tokens();
+    let reserved_tokens = context_reserved_tokens();
+
+    let base_prompt = build_chat_prompt(
+        user_input,
+        &[],
+        errors,
+        tool_info,
+        output_targets,
+        has_file_op_intent,
+        file_writes_enabled,
+        tool_results,
+    );
+    let base_tokens = estimate_tokens(&base_prompt);
+    if base_tokens >= max_tokens {
+        return PromptWithLimit {
+            prompt: base_prompt,
+            notices: Vec::new(),
+            overflow: true,
+        };
+    }
+
+    let budget_tokens = max_tokens.saturating_sub(base_tokens + reserved_tokens);
+    let (trimmed_files, notices) = truncate_files_to_budget(files, budget_tokens);
+    let prompt = build_chat_prompt(
+        user_input,
+        &trimmed_files,
+        errors,
+        tool_info,
+        output_targets,
+        has_file_op_intent,
+        file_writes_enabled,
+        tool_results,
+    );
+    let overflow = estimate_tokens(&prompt) > max_tokens;
+    if overflow {
+        return PromptWithLimit {
+            prompt: base_prompt,
+            notices,
+            overflow: true,
+        };
+    }
+
+    PromptWithLimit {
+        prompt,
+        notices,
+        overflow: false,
+    }
+}
+
+fn truncate_files_to_budget(
+    files: &[file_ops::FileContent],
+    budget_tokens: usize,
+) -> (Vec<file_ops::FileContent>, Vec<TruncationNotice>) {
+    if files.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    let original_tokens: Vec<usize> = files
+        .iter()
+        .map(|file| estimate_tokens(&file.content))
+        .collect();
+    let total_tokens: usize = original_tokens.iter().sum();
+
+    if budget_tokens == 0 {
+        let notices = files
+            .iter()
+            .enumerate()
+            .map(|(idx, file)| TruncationNotice {
+                path: file.original_path.clone(),
+                original_tokens: original_tokens[idx],
+                kept_tokens: 0,
+            })
+            .collect();
+        return (Vec::new(), notices);
+    }
+
+    if total_tokens <= budget_tokens {
+        return (files.to_vec(), Vec::new());
+    }
+
+    let mut allocations = vec![0usize; files.len()];
+    if total_tokens > 0 {
+        for i in 0..files.len() {
+            allocations[i] = budget_tokens * original_tokens[i] / total_tokens;
+        }
+    }
+
+    let allocated: usize = allocations.iter().sum();
+    let mut remainder = budget_tokens.saturating_sub(allocated);
+    let mut order: Vec<usize> = (0..files.len()).collect();
+    order.sort_by_key(|&i| Reverse(original_tokens[i]));
+    for idx in order {
+        if remainder == 0 {
+            break;
+        }
+        allocations[idx] += 1;
+        remainder -= 1;
+    }
+
+    let mut trimmed_files = Vec::with_capacity(files.len());
+    let mut notices = Vec::new();
+
+    for (idx, file) in files.iter().enumerate() {
+        let limit_tokens = allocations[idx];
+        if limit_tokens == 0 {
+            notices.push(TruncationNotice {
+                path: file.original_path.clone(),
+                original_tokens: original_tokens[idx],
+                kept_tokens: 0,
+            });
+            continue;
+        }
+
+        let (content, kept_tokens, truncated) =
+            truncate_file_content(&file.content, limit_tokens);
+        if truncated {
+            notices.push(TruncationNotice {
+                path: file.original_path.clone(),
+                original_tokens: original_tokens[idx],
+                kept_tokens,
+            });
+        }
+        trimmed_files.push(file_ops::FileContent {
+            content,
+            original_path: file.original_path.clone(),
+        });
+    }
+
+    (trimmed_files, notices)
+}
+
+fn truncate_file_content(content: &str, limit_tokens: usize) -> (String, usize, bool) {
+    if content.is_empty() || limit_tokens == 0 {
+        return (String::new(), 0, !content.is_empty());
+    }
+
+    let max_bytes = limit_tokens.saturating_mul(3).max(1);
+    if content.as_bytes().len() <= max_bytes {
+        return (content.to_string(), estimate_tokens(content), false);
+    }
+
+    let marker = "\n[...truncated...]\n";
+    let marker_bytes = marker.as_bytes().len();
+    let keep_bytes = max_bytes.saturating_sub(marker_bytes);
+    if keep_bytes == 0 {
+        let head = take_head_by_bytes(content, max_bytes);
+        let kept_tokens = estimate_tokens(head);
+        return (head.to_string(), kept_tokens, true);
+    }
+
+    let head_bytes = keep_bytes * 2 / 3;
+    let tail_bytes = keep_bytes.saturating_sub(head_bytes);
+    let head = take_head_by_bytes(content, head_bytes);
+    let tail = if tail_bytes > 0 {
+        take_tail_by_bytes(content, tail_bytes)
+    } else {
+        ""
+    };
+    let truncated = format!("{}{}{}", head, marker, tail);
+    let kept_tokens = estimate_tokens(&truncated);
+    (truncated, kept_tokens, true)
+}
+
+fn take_head_by_bytes(text: &str, max_bytes: usize) -> &str {
+    if max_bytes == 0 || text.is_empty() {
+        return "";
+    }
+    if text.as_bytes().len() <= max_bytes {
+        return text;
+    }
+    let mut end = 0usize;
+    for (idx, ch) in text.char_indices() {
+        let next = idx + ch.len_utf8();
+        if next > max_bytes {
+            break;
+        }
+        end = next;
+    }
+    &text[..end]
+}
+
+fn take_tail_by_bytes(text: &str, max_bytes: usize) -> &str {
+    if max_bytes == 0 || text.is_empty() {
+        return "";
+    }
+    if text.as_bytes().len() <= max_bytes {
+        return text;
+    }
+    let start_target = text.as_bytes().len().saturating_sub(max_bytes);
+    for (idx, _) in text.char_indices() {
+        if idx >= start_target {
+            return &text[idx..];
+        }
+    }
+    ""
+}
+
+fn estimate_tokens(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let bytes = text.as_bytes().len();
+    (bytes + 2) / 3
+}
+
+fn max_context_tokens() -> usize {
+    *MAX_CONTEXT_TOKENS.get_or_init(|| {
+        std::env::var("RKLLM_MAX_CONTEXT_TOKENS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(4096)
+    })
+}
+
+fn context_reserved_tokens() -> usize {
+    *CONTEXT_RESERVED_TOKENS.get_or_init(|| {
+        std::env::var("RKLLM_CONTEXT_RESERVED_TOKENS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(256)
+    })
 }
 
 #[cfg(test)]
