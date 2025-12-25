@@ -25,17 +25,18 @@ This repository contains the "Agentic CLI & MCP Client (Rust)" based on the arch
 The Rock5B's NPU delivers only 6 TOPS, so please don't expect too much.
 
 ```text
-      ┌──────┐
-      │ User │
-      └──┬───┘
+  ┌─────────────┐
+  │    User     │
+  └──────┬──────┘
+      Terminal
 ┌────────│────────────────────────── Rock5B ─┐
 │        ▼                                   │
-│ ┌──────────────┐    ┌───────────────┐      │
-│ │ Agentic CLI  │◀︎──▶︎│ librkllmrt.so │      │
-│ │ & MCP Client │    └┬──────────────┘      │
-│ │ (Rust)       │     │  ┌───────────┐      │
-│ └──────────────┘     └─▶︎│ LLM Model │      │
-│        │                └───────────┘      │
+│ ┌──────────────┐         ┌───────────────┐ │
+│ │ Agentic CLI  │◀︎───────▶︎│ librkllmrt.so │ │
+│ │ & MCP Client │         └┬──────────────┘ │
+│ │ (Rust)       │          │  ┌───────────┐ │
+│ └──────────────┘          └─▶︎│ LLM Model │ │
+│        │                     └───────────┘ │
 │        ├─────────────┬─────────────┐       │
 │        ▼             ▼             ▼       │
 │ ┌────────────┐┌────────────┐┌────────────┐ │
@@ -47,22 +48,18 @@ The Rock5B's NPU delivers only 6 TOPS, so please don't expect too much.
 │        ▼                                   │
 │ ┌────────────────────────────────────────┐ │
 │ │ SQLite3                                │ │
-│ ├────────────────────┬───────────────────┤ │
-│ │ Sensor1 Data       │ Sensor2 Data      │ │
-│ └────────────────────┴───────────────────┘ │
+│ ├───────────────────┬────────────────────┤ │
+│ │ Sensor1 Data      │ Sensor2 Data       │ │
+│ └───────────────────┴────────────────────┘ │
 │        ▲                       ▲           │
 │ ┌──────┴───────────────────────┴─────────┐ │
 │ │ REST API as a Edge Server (Rust)       │ │
-│ │   /api/climate/save                    │ │
-│ │   /api/hmmd/save                       │ │
 │ └────────────────────────────────────────┘ │
 │        ▲                       ▲           │
 └────────│───────────────────────│───────────┘
 ┌────────┴────────────┐┌─────────┴───────────┐
 │ MCU + Sensor1 (C++) ││ MCU + Sensor2 (C++) │
 └─────────────────────┘└─────────────────────┘
-  Nano ESP32-S3          Nano ESP32-S3
-  BME280                 HMMD mmWave
 ```
 
 ## Features
@@ -250,3 +247,64 @@ This project is provided as-is for use with Rockchip NPU hardware.
 ## Reference
 
 - Python implementation: `sample/gradio_server.py`
+
+## Thoughs
+
+- Rock5B's NPU delivers 6 TOPS performance
+  - Approximately 12 tokens/s for 1B models
+- From a physical memory perspective, larger models can be used, but the NPU becomes the bottleneck
+  - Using 7B or 12B models is possible but unacceptably slow
+- `librkllmrt.so` limits the context to 4096
+  - Complex inference is impossible
+  - When including files in input prompts, processing like truncation is mandatory
+
+Therefore, high-performance capabilities like those of cloud LLMs cannot be expected. This means usage must be limited to specific purposes.
+
+- Rock5B の NPU は 6 TOPS の性能
+  - 1B モデルで 12 tokens/s 程度
+- 物理メモリ観点では、より大きいモデルを利用できるが NPU がボトルネック
+  - 7B, 12B モデルを使えるがありえない遅さ
+- `librkllmrt.so` がコンテキストを 4096 に制限してる
+  - 複雑な推論が不可能
+  - 入力プロンプトにファイルを含める場合、truncate などの処理が必須
+
+このように低スペックなので、用途を限定的にするしかない。例えば、アーキテクチャを以下のようにし、IoT 操作やセンサー情報取得に専念するなど。
+
+```text
+  ┌─────────────┐
+  │    User     │
+  └──────┬──────┘
+      Browser
+┌────────│──────────────────── Rock5B ─┐
+│        ▼                             │
+│ ┌────────────┐     ┌───────────────┐ │
+│ │ Web UI     │◀︎───▶︎│ librkllmrt.so │ │
+│ │ & REST API │     └┬──────────────┘ │
+│ │ MCP Client │      │  ┌───────────┐ │
+│ └──────┬─────┘      └─▶︎│ LLM Model │ │
+│        │               └───────────┘ │
+│        ├───────────────────────┐     │
+│        ▼                       ▼     │
+│ ┌────────────┐     ┌───────────────┐ │
+│ │ MCP Server │     │ MCP Server    │ │
+│ │ DB Adapter │     │ IoT Controler │ │
+│ └──────┬─────┘     └───────────┬───┘ │
+│        ▼                       │     │
+│ ┌───────────────────────────┐  │     │
+│ │ SQLite3                   │  │     │
+│ ├────────┬────────┬─────────┤  │     │
+│ │ Data   │ Data   │ ...     │  │     │
+│ └────────┴────────┴─────────┘  │     │
+│              ▲                 │     │
+│ ┌────────────┴──────────────┐  │     │
+│ │ REST API as a Edge Server │  │     │
+│ └───────────────────────────┘  │     │
+│      ▲                         │     │
+└──────│─────────────────────────│─────┘
+┌──────┴───────┐                 ▼
+│ MCU + Sensor │┐   ┌──────────────────┐
+└──────────────┘│┐  │ MCU +            │
+ └──────────────┘│  │ Motor or Camera  │
+  └──────────────┘  │ or LED and other │
+                    └──────────────────┘
+```
