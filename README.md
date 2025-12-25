@@ -87,6 +87,7 @@ The Rock5B's NPU delivers only 6 TOPS, so please don't expect too much.
 - Rust toolchain (for aarch64-unknown-linux-gnu if cross-compiling)
 - `librkllmrt.so` library (provided by Rockchip)
 - RKLLM model file (`.rkllm` format)
+- [MCP Server and Edge Server](https://github.com/tkumata/mcp-iot)
 
 ## Setup
 
